@@ -1,0 +1,55 @@
+# --- Toolchain fetched by src/setup_env.sh ---
+dev_env/
+
+# --- Maven ---
+target/
+pom.xml.versionsBackup
+.mvn/
+mvnw
+mvnw.cmd
+
+# --- Generated gRPC/protobuf sources ---
+**/generated-sources/
+**/generated-test-sources/
+
+# --- IDEs ---
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+nbproject/
+
+# --- LaTeX build artifacts (report/) ---
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.bbl
+*.blg
+*.brf
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.dvi
+
+# --- OS junk ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# --- Logs / runtime scratch ---
+*.log
+nohup.out
