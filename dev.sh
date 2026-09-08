@@ -15,7 +15,12 @@ else
     exit 1
 fi
 
-compose() { "$ENGINE" compose "$@"; }
+# Profiles are always enabled so that `down`, `ps` and `logs` see the whole
+# deployment. Podman refuses to remove the `net` container while any replica
+# still shares its namespace, so a `down` that did not know about s3-s6 would
+# strand them and then fail. Commands below always name their services, so
+# enabling profiles never starts anything extra.
+compose() { "$ENGINE" compose --profile extended --profile tools "$@"; }
 
 # Schedules A and B run replicas 0-2; C runs 0-6.
 replicas_for() {
