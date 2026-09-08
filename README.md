@@ -29,33 +29,26 @@ On Apple Silicon this does not work at all: protoc 3.12.0 publishes no
 
 ## Running
 
-    ./dev.sh up        # three replicas, schedule A, ports 20000-20002
+    ./dev.sh up        # Schedule A: replicas 0-2, ports 20000-20002
     ./dev.sh console   # ballot/debug commands (crash, freeze, slow-mode)
     ./dev.sh app       # interactive client
 
-`help` lists the commands in the app or the console. `./dev.sh` on its own lists
-every command; `./dev.sh down` stops things.
+`./dev.sh` on its own lists every command. `up`, `app` and `console` all take a
+schedule: `A` (default) and `B` run replicas 0-2, `C` runs 0-6 on ports
+20000-20006. Pass the same schedule to all three.
 
-All replicas run inside a single container on purpose. `DidaTradeServerState`
-addresses peers as `localhost:<base_port + id>`, so they have to share one
-network namespace; `app` and `console` join it too, which is why they still pass
-`localhost` in their arguments.
+Each replica is its own container, so they can be stopped and started
+independently -- which is what Step 5 needs, since a state transfer is only
+observable when a replica misses decisions and then has to catch up:
 
-<details>
-<summary>Running by hand, three terminals</summary>
+    ./dev.sh up C
+    ./dev.sh stop 6     # replicas 0-5 keep deciding values
+    ./dev.sh start 6    # 6 comes back and must learn what it missed
+    ./dev.sh logs 6
 
-`./dev.sh shell` gives you a shell with JDK 22 and Maven and the source mounted
-at `/work/src`. Inside it, the original flow works as-is — base port is
-arbitrary, server `i` binds `port + i`:
-
-    cd /work/src/server
-    mvn exec:java -Dexec.args="20000 0 A"
-    mvn exec:java -Dexec.args="20000 1 A"
-    mvn exec:java -Dexec.args="20000 2 A"
-
-    cd /work/src/app     && mvn exec:java -Dexec.args="1 localhost 20000 A"
-    cd /work/src/console && mvn exec:java -Dexec.args="localhost 20000 A"
-</details>
+All replicas nonetheless share one network namespace, because
+`DidaTradeServerState` addresses peers as `localhost:<base_port + id>`. `app`
+and `console` join it too, which is why they still pass `localhost`.
 
 ## Layout
 
@@ -69,9 +62,9 @@ arbitrary, server `i` binds `port + i`:
     report/        LaTeX report
 
     Containerfile        dev/runtime image
-    compose.yaml         replicas + app + console
+    compose.yaml         net namespace, replicas s0-s6, app, console
     dev.sh               entry point for all of it
-    scripts/             replica launcher
+    scripts/             build and per-replica launchers
 
 ## TODO
 
@@ -84,6 +77,9 @@ Checkpoint is 30 Sep, final is 16 Oct.
 - [ ] Step 3 — Fast-Paxos. New on the syllabus this year, so the paper is the only
       real source.
 - [ ] Step 4 — `balance` outside Paxos, causally ordered. Needs vector clocks.
-- [ ] Step 5 — dynamic membership and state transfer, Schedule B. Stretch goal.
+- [ ] Step 5 — dynamic membership and state transfer, Schedule B (spec §6).
+      Schedule C is wired up too: 7 replicas, and the acceptor set really does
+      change ({0,1,2,3,4} → {2,3,4,5,6} at Config3), so it is the harder case to
+      test state transfer against.
 - [ ] Report, 6 pages. Must include the AI-use declaration (spec §13) and the
       authorship declaration (§14).

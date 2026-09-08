@@ -1,67 +1,94 @@
 # dida-trade, containerized. Runs unchanged under `docker compose` and
-# `podman compose`.
+# `podman compose`. Drive it through ./dev.sh rather than by hand.
 #
-# All replicas live in ONE container by design: Paxos peers are addressed as
-# localhost:<base_port + id> in DidaTradeServerState, so they have to share a
-# network namespace. app and console join that same namespace via
-# network_mode, which is why they keep passing "localhost" exactly as the
-# README describes.
+# Every replica joins the network namespace of the `net` service. That is not a
+# convenience: DidaTradeServerState addresses peers as
+# localhost:<base_port + id>, so replicas that did not share a namespace would
+# never reach each other. Sharing one namespace keeps that assumption true while
+# still giving each replica its own container, and therefore its own lifecycle --
+# which is what Step 5 needs, since state transfer is only observable when a
+# replica can be stopped and brought back while the others keep running.
+#
+# Schedules: A and B use replicas 0-2, C uses 0-6 (acceptors change from
+# {0,1,2,3,4} to {2,3,4,5,6} at Config3). SCHEDULE is set by dev.sh.
+
+x-replica: &replica
+  image: didatrade:dev
+  init: true
+  depends_on: [net]
+  network_mode: "service:net"
+  entrypoint: ["/work/scripts/replica.sh"]
+  environment:
+    BASE_PORT: "${BASE_PORT:-20000}"
+    SCHEDULE: "${SCHEDULE:-A}"
+  volumes:
+    - ./src:/work/src
+    - ./scripts:/work/scripts:ro
+    - m2:/root/.m2
+
+x-tool: &tool
+  image: didatrade:dev
+  profiles: ["tools"]
+  depends_on: [net]
+  network_mode: "service:net"
+  stdin_open: true
+  tty: true
+  volumes:
+    - ./src:/work/src
+    - ./scripts:/work/scripts:ro
+    - m2:/root/.m2
 
 services:
-  replicas:
+  # Owns the network namespace and publishes the whole port range that
+  # Schedule C can use. Holds no application logic.
+  net:
     build:
       context: .
       dockerfile: Containerfile
     image: didatrade:dev
     init: true
-    environment:
-      BASE_PORT: "20000"
-      SCHEDULE: "A"
-      REPLICAS: "3"
-    command: ["/work/scripts/run-replicas.sh"]
+    command: ["sleep", "infinity"]
+    ports:
+      - "20000-20006:20000-20006"
+
+  s0: {<<: *replica, command: ["0"]}
+  s1: {<<: *replica, command: ["1"]}
+  s2: {<<: *replica, command: ["2"]}
+
+  # Schedule C only. Profiled so a bare `compose up` does not start them;
+  # naming one on the command line enables it.
+  s3: {<<: *replica, command: ["3"], profiles: ["extended"]}
+  s4: {<<: *replica, command: ["4"], profiles: ["extended"]}
+  s5: {<<: *replica, command: ["5"], profiles: ["extended"]}
+  s6: {<<: *replica, command: ["6"], profiles: ["extended"]}
+
+  app:
+    <<: *tool
+    working_dir: /work/src/app
+    command: ["mvn", "-o", "exec:java", "-Dexec.args=1 localhost ${BASE_PORT:-20000} ${SCHEDULE:-A}"]
+
+  # Ballot/debug commands: crash, freeze, un-freeze, slow-mode, reconfiguration.
+  console:
+    <<: *tool
+    working_dir: /work/src/console
+    command: ["mvn", "-o", "exec:java", "-Dexec.args=localhost ${BASE_PORT:-20000} ${SCHEDULE:-A}"]
+
+  # Serial build into the shared Maven volume. Never run concurrently with
+  # replicas -- see scripts/build.sh.
+  builder:
+    image: didatrade:dev
+    profiles: ["tools"]
+    entrypoint: ["/work/scripts/build.sh"]
     volumes:
       - ./src:/work/src
       - ./scripts:/work/scripts:ro
       - m2:/root/.m2
-    ports:
-      - "20000-20002:20000-20002"
 
-  # Interactive; started with `./dev.sh app`, not by `up`.
-  app:
-    image: didatrade:dev
-    profiles: ["tools"]
-    depends_on: [replicas]
-    network_mode: "service:replicas"
-    stdin_open: true
-    tty: true
-    working_dir: /work/src/app
-    command: ["mvn", "exec:java", "-Dexec.args=1 localhost 20000 A"]
-    volumes:
-      - ./src:/work/src
-      - m2:/root/.m2
-
-  # Ballot/debug commands to the replicas: crash, freeze, un-freeze, slow-mode.
-  console:
-    image: didatrade:dev
-    profiles: ["tools"]
-    depends_on: [replicas]
-    network_mode: "service:replicas"
-    stdin_open: true
-    tty: true
-    working_dir: /work/src/console
-    command: ["mvn", "exec:java", "-Dexec.args=localhost 20000 A"]
-    volumes:
-      - ./src:/work/src
-      - m2:/root/.m2
-
-  # Plain dev shell: JDK 22 + Maven, source bind-mounted, own network so it can
-  # run the full three-replica setup by hand without clashing with `up`.
+  # JDK 22 + Maven with the source mounted, own network. For building and
+  # poking around by hand.
   shell:
     image: didatrade:dev
     profiles: ["tools"]
-    build:
-      context: .
-      dockerfile: Containerfile
     stdin_open: true
     tty: true
     command: ["bash"]

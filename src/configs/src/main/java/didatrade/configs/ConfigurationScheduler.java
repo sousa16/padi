@@ -15,7 +15,7 @@ public class ConfigurationScheduler {
     public ConfigurationScheduler(char option) {
 	if (option == 'C')
 	    s = new ScheduleC ();
-	if (option == 'B')
+	else if (option == 'B')
 	    s = new ScheduleB ();
 	else 
 	    s = new ScheduleA ();
