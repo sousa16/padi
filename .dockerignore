@@ -1,0 +1,5 @@
+.git/
+report/
+*.pdf
+src/dev_env/
+**/target/
