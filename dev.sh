@@ -37,7 +37,7 @@ usage: ./dev.sh <command> [args]
 
   build              build the image and compile the tree
   up [A|B|C]         run a schedule (default A). A/B use 3 replicas, C uses 7
-  app [A|B|C]        attach an interactive client
+  app [id] [A|B|C]   attach an interactive client (id 1-99, default 1)
   console [A|B|C]    attach the admin console (crash/freeze/slow-mode/reconfig)
   shell              JDK 22 + Maven shell, source at /work/src
   stop <id>          stop one replica, leaving the rest running
@@ -49,6 +49,12 @@ usage: ./dev.sh <command> [args]
 
 Schedule A, three terminals:
   ./dev.sh up            ./dev.sh console          ./dev.sh app
+
+Concurrent clients need distinct ids. DidaTradeApp builds every request id as
+sequence_number * 100 + client_id, and replicas dedupe on that int, so a second
+client left at id 1 has its requests dropped as replays of the first's:
+  ./dev.sh app          # client 1
+  ./dev.sh app 2        # client 2, same schedule
 
 Step 5, state transfer on Schedule C -- stop a replica, let the others decide
 values without it, then bring it back and watch it catch up:
@@ -72,9 +78,24 @@ case "$cmd" in
         SCHEDULE="${1:-A}"; export SCHEDULE
         compose up net $(replicas_for "$SCHEDULE")
         ;;
-    app|console)
+    app)
+        # `app 2 C` sets both; `app C` is still just a schedule, since a client
+        # id is always numeric.
+        CLIENT_ID=1
+        case "${1:-}" in
+            ''|[A-Za-z]*) ;;
+            *[!0-9]*|0|0*) echo "client id must be 1-99, got '$1'" >&2; exit 1 ;;
+            *) CLIENT_ID="$1"; shift ;;
+        esac
+        [ "$CLIENT_ID" -le 99 ] || { echo "client id must be 1-99, got '$CLIENT_ID'" >&2; exit 1; }
         SCHEDULE="${1:-A}"; export SCHEDULE
-        compose run --rm "$cmd"
+        # Overrides the service command, which hardcodes id 1.
+        compose run --rm app \
+            mvn -o exec:java -Dexec.args="$CLIENT_ID localhost ${BASE_PORT:-20000} $SCHEDULE"
+        ;;
+    console)
+        SCHEDULE="${1:-A}"; export SCHEDULE
+        compose run --rm console
         ;;
     shell)
         compose run --rm shell

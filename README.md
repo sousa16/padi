@@ -37,6 +37,14 @@ On Apple Silicon this does not work at all: protoc 3.12.0 publishes no
 schedule: `A` (default) and `B` run replicas 0-2, `C` runs 0-6 on ports
 20000-20006. Pass the same schedule to all three.
 
+`app` also takes a client id, `./dev.sh app 2` (or `./dev.sh app 2 C`), default 1.
+Concurrent clients must not share one: `DidaTradeApp` builds each request id as
+`sequence_number * 100 + client_id` and `RequestHistory` dedupes on that int, so
+a second client left at id 1 has its requests answered as replays of the first's.
+One client is single-threaded -- it blocks in `waitForQuorum` before reading the
+next command -- so contention, ballot preemption and Fast-Paxos collisions only
+appear with two or more.
+
 Each replica is its own container, so they can be stopped and started
 independently -- which is what Step 5 needs, since a state transfer is only
 observable when a replica misses decisions and then has to catch up:
