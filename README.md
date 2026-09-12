@@ -58,6 +58,38 @@ All replicas nonetheless share one network namespace, because
 `DidaTradeServerState` addresses peers as `localhost:<base_port + id>`. `app`
 and `console` join it too, which is why they still pass `localhost`.
 
+## Debug modes
+
+`SetDebugRequest` carries a bare int, so the encoding is ours:
+
+| Mode | Name          | Effect                                              |
+|------|---------------|-----------------------------------------------------|
+| 0    | normal        | clear freeze and slow-mode                          |
+| 1    | crash         | replica exits; `./dev.sh start <id>` brings it back |
+| 2    | freeze        | hold all client and peer requests until un-freeze   |
+| 3    | un-freeze     | release the held requests and resume                |
+| 4    | slow-mode-on  | random delay before each client and peer request    |
+| 5    | slow-mode-off | stop delaying                                       |
+
+From the console, mode first, then replica:
+
+    console> debug 1 2      # crash replica 2
+    console> debug 2 0      # freeze replica 0
+    console> debug 3 0      # un-freeze it again
+
+Modes gate `DidaTradeMainServiceImpl` and `DidaTradePaxosServiceImpl` only.
+`DidaTradeMasterServiceImpl` is deliberately never gated: a frozen replica must
+still be able to receive its own un-freeze (spec §5). Held requests block in
+their gRPC handler thread rather than being dropped, so they resume on
+un-freeze.
+
+The gate sits on *inbound* RPCs, so freezing a replica stops it acting as
+acceptor and learner but does not stop its `MainLoop` from proposing. To stall a
+leader, crash it.
+
+No compose service sets a restart policy, so a crashed replica stays down until
+`./dev.sh start <id>`.
+
 ## Layout
 
     src/contract   protos

@@ -75,7 +75,8 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 	boolean response_value = true;
 
 	int request_id   = request.getReqid();
-	this.server_state.setDebugMode (request.getMode());
+	int mode         = request.getMode();
+	this.server_state.setDebugMode (mode);
 
 	// for debug purposes
 	System.out.println("Setting debug mode to = " + this.server_state.getDebugMode());
@@ -87,5 +88,23 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 	DidaTradeMaster.SetDebugReply response = response_builder.build();
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
+
+	// Done last, after the reply has been sent, so that a crash cannot kill
+	// its own reply on the way out.
+	switch (mode) {
+	case DidaTradeServerState.DEBUG_CRASH:
+	    this.server_state.crash();
+	    break;
+	case DidaTradeServerState.DEBUG_NORMAL:
+	case DidaTradeServerState.DEBUG_FREEZE:
+	case DidaTradeServerState.DEBUG_UNFREEZE:
+	case DidaTradeServerState.DEBUG_SLOW_ON:
+	case DidaTradeServerState.DEBUG_SLOW_OFF:
+	    System.out.println("Debug mode " + mode + " recorded, not implemented yet");
+	    break;
+	default:
+	    System.err.println("*** Unknown debug mode " + mode + " ***");
+	    break;
+	}
     }
 }

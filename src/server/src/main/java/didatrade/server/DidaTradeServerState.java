@@ -16,6 +16,17 @@ import io.grpc.ManagedChannelBuilder;
 
 public class DidaTradeServerState {
     public static final int     DEFAULT_POPULATION = 10;
+
+    /* Debug modes, as typed at the console: `debug <mode> <replica>`. See README. */
+    public static final int     DEBUG_NORMAL    = 0;
+    public static final int     DEBUG_CRASH     = 1;
+    public static final int     DEBUG_FREEZE    = 2;
+    public static final int     DEBUG_UNFREEZE  = 3;
+    public static final int     DEBUG_SLOW_ON   = 4;
+    public static final int     DEBUG_SLOW_OFF  = 5;
+
+    /* How long to wait before a simulated crash, so the reply to the console gets sent first. */
+    private static final int    CRASH_DELAY_MS  = 200;
     int                         max_participants;
     TradeManager                trade_manager;
     ConfigurationScheduler      scheduler;
@@ -153,6 +164,44 @@ public class DidaTradeServerState {
 
     public synchronized void setDebugMode (int mode) {
 	this.debug_mode = mode;
+    }
+
+    /**
+     * Pretends this replica crashed, by killing the process.
+     *
+     * Call this only after the reply to the console has been sent. Sending a
+     * gRPC reply does not put it on the network straight away: it is queued,
+     * and another thread writes it out a moment later. That is why we wait
+     * before dying. If we killed the process immediately, the reply would
+     * sometimes never leave, and the console would print "no reply received" --
+     * which looks exactly like having typed the id of a replica that was
+     * already down.
+     *
+     * We use halt() rather than exit() because halt() stops the process dead,
+     * the way a real crash does. exit() would first run Java's tidy-up code,
+     * which a machine losing power never gets to do.
+     *
+     * Killing this process also stops its container, because the replica is
+     * what the container runs. Nothing brings it back automatically: restart it
+     * with `dev.sh start <id>`.
+     */
+    public void crash () {
+	System.out.println("Debug: crash requested by the console, going down in " + CRASH_DELAY_MS + "ms");
+
+	Thread killer = new Thread (() -> {
+		try {
+		    Thread.sleep (CRASH_DELAY_MS);
+		}
+		catch (InterruptedException e) {
+		}
+		Runtime.getRuntime().halt (0);
+	    });
+	// A new thread copies the daemon flag of whoever created it, and gRPC's
+	// handler threads are daemons -- daemon threads get abandoned when the JVM
+	// shuts down. Making this one ordinary guarantees it lives long enough to
+	// do its job.
+	killer.setDaemon (false);
+	killer.start ();
     }
 
 }
