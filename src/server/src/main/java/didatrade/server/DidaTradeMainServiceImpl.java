@@ -16,6 +16,8 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 
     @Override
     public void populate(DidaTradeMain.PopulateRequest request, StreamObserver<DidaTradeMain.PopulateReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// for debug purposes
 	System.out.println("Receiving populate request:" + request);
 
@@ -45,6 +47,8 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 
     @Override
     public void adduser(DidaTradeMain.AddUserRequest request, StreamObserver<DidaTradeMain.AddUserReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// for debug purposes
 	System.out.println("Receiving add request:" + request);
 
@@ -76,6 +80,8 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
     }
     
     public void buy(DidaTradeMain.BuyRequest request, StreamObserver<DidaTradeMain.BuyReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// for debug purposes
 	System.out.println("Receiving buy request:" + request);
 
@@ -107,6 +113,8 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 
     @Override
     public void sell(DidaTradeMain.SellRequest request, StreamObserver<DidaTradeMain.SellReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// for debug purposes
 	System.out.println("Receiving sell request:" + request);
 
@@ -138,6 +146,8 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 
     @Override
     public void balance(DidaTradeMain.BalanceRequest request, StreamObserver<DidaTradeMain.BalanceReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// for debug purposes
 	System.out.println("Receiving balance request:" + request);
 
@@ -169,6 +179,8 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 
     @Override
     public void dump(DidaTradeMain.DumpRequest request, StreamObserver<DidaTradeMain.DumpReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// for debug purposes
 	System.out.println("Receiving dump request:" + request);
 

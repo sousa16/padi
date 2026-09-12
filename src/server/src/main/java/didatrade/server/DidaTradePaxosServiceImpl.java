@@ -24,6 +24,8 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
  
     @Override
     public void phaseone(DidaTradePaxos.PhaseOneRequest request, StreamObserver<DidaTradePaxos.PhaseOneReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// System.out.println("Receive phase1 request: \n" + request);
 
 	int instance          = request.getInstance();
@@ -62,6 +64,8 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 
     @Override
     public void phasetwo(DidaTradePaxos.PhaseTwoRequest request, StreamObserver<DidaTradePaxos.PhaseTwoReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// System.out.println ("Receive phase two request: \n" + request);
 
 	int instance          = request.getInstance();
@@ -129,6 +133,8 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 
     @Override
     public void learn(DidaTradePaxos.LearnRequest request, StreamObserver<DidaTradePaxos.LearnReply> responseObserver) {
+	this.server_state.waitForUnfreeze();
+
 	// System.out.println("Receive learn request: \n" + request);
 
 	int instance         = request.getInstance();

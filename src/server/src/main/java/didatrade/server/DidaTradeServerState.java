@@ -164,7 +164,30 @@ public class DidaTradeServerState {
 
     public synchronized void setDebugMode (int mode) {
 	this.debug_mode = mode;
+	if (mode != DEBUG_FREEZE)
+	    this.notifyAll();
     }
+
+	/**
+	 * Blocks an inbound client or Paxos request while this replica is frozen.
+	 *
+	 * The master service is deliberately not protected by this gate. That
+	 * service must remain available so that the console can send mode 3 and
+	 * release requests waiting here. Requests are kept in their gRPC handler
+	 * threads rather than being discarded, so they continue normally after
+	 * the replica is unfrozen.
+	 */
+	public synchronized void waitForUnfreeze () {
+	while (this.debug_mode == DEBUG_FREEZE) {
+	    try {
+		this.wait();
+	    }
+	    catch (InterruptedException e) {
+		Thread.currentThread().interrupt();
+		return;
+	    }
+	}
+	}
 
     /**
      * Pretends this replica crashed, by killing the process.

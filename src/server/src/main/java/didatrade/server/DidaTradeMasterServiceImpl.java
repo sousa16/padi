@@ -96,11 +96,15 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 	    this.server_state.crash();
 	    break;
 	case DidaTradeServerState.DEBUG_NORMAL:
-	case DidaTradeServerState.DEBUG_FREEZE:
-	case DidaTradeServerState.DEBUG_UNFREEZE:
 	case DidaTradeServerState.DEBUG_SLOW_ON:
 	case DidaTradeServerState.DEBUG_SLOW_OFF:
 	    System.out.println("Debug mode " + mode + " recorded, not implemented yet");
+	    break;
+	case DidaTradeServerState.DEBUG_FREEZE:
+	    System.out.println("Debug mode freeze enabled");
+	    break;
+	case DidaTradeServerState.DEBUG_UNFREEZE:
+	    System.out.println("Debug mode freeze disabled");
 	    break;
 	default:
 	    System.err.println("*** Unknown debug mode " + mode + " ***");
