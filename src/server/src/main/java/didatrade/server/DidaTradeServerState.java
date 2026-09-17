@@ -190,23 +190,13 @@ public class DidaTradeServerState {
 	}
 
     /**
-     * Pretends this replica crashed, by killing the process.
+     * pretends this replica crashed, by killing the process.
+	 * 
+     * adds a small sleep to ensure the reply to the console has been sent.
+	 * not adding this timeout caused the response to not leave sometimes
      *
-     * Call this only after the reply to the console has been sent. Sending a
-     * gRPC reply does not put it on the network straight away: it is queued,
-     * and another thread writes it out a moment later. That is why we wait
-     * before dying. If we killed the process immediately, the reply would
-     * sometimes never leave, and the console would print "no reply received" --
-     * which looks exactly like having typed the id of a replica that was
-     * already down.
-     *
-     * We use halt() rather than exit() because halt() stops the process dead,
-     * the way a real crash does. exit() would first run Java's tidy-up code,
-     * which a machine losing power never gets to do.
-     *
-     * Killing this process also stops its container, because the replica is
-     * what the container runs. Nothing brings it back automatically: restart it
-     * with `dev.sh start <id>`.
+     * halt() rather than exit() because halt() stops the process dead,
+     * the way a real crash does. exit() would first run Java's tidy-up code.
      */
     public void crash () {
 	System.out.println("Debug: crash requested by the console, going down in " + CRASH_DELAY_MS + "ms");
@@ -219,10 +209,6 @@ public class DidaTradeServerState {
 		}
 		Runtime.getRuntime().halt (0);
 	    });
-	// A new thread copies the daemon flag of whoever created it, and gRPC's
-	// handler threads are daemons -- daemon threads get abandoned when the JVM
-	// shuts down. Making this one ordinary guarantees it lives long enough to
-	// do its job.
 	killer.setDaemon (false);
 	killer.start ();
     }
