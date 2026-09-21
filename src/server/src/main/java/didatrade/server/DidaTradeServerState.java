@@ -27,6 +27,9 @@ public class DidaTradeServerState {
 
     /* How long to wait before a simulated crash, so the reply to the console gets sent first. */
     private static final int    CRASH_DELAY_MS  = 200;
+
+    /* Upper bound of the random delay applied in slow mode. */
+    private static final int    SLOW_MODE_MAX_MS = 1000;
     int                         max_participants;
     TradeManager                trade_manager;
     ConfigurationScheduler      scheduler;
@@ -44,6 +47,8 @@ public class DidaTradeServerState {
     private int                 current_ballot;
     private int                 completed_ballot;
     private int                 debug_mode;
+    private boolean             slow_mode;
+    private Random              debug_rnd;
     private boolean             fastpaxos_on;
  
     MainLoop                    main_loop;
@@ -55,6 +60,8 @@ public class DidaTradeServerState {
 	this.base_port        = port;
 	this.my_id            = myself;
 	this.debug_mode       = 0;
+	this.slow_mode        = false;
+	this.debug_rnd        = new Random();
 	this.fastpaxos_on     = false;
 	this.current_ballot   = 0;
 	this.completed_ballot = -1;
@@ -168,16 +175,42 @@ public class DidaTradeServerState {
 	    this.notifyAll();
     }
 
-	/**
-	 * Blocks an inbound client or Paxos request while this replica is frozen.
-	 *
-	 * The master service is deliberately not protected by this gate. That
-	 * service must remain available so that the console can send mode 3 and
-	 * release requests waiting here. Requests are kept in their gRPC handler
-	 * threads rather than being discarded, so they continue normally after
-	 * the replica is unfrozen.
-	 */
-	public synchronized void waitForUnfreeze () {
+    public synchronized boolean getSlowMode () {
+	return this.slow_mode;
+    }
+
+    public synchronized void setSlowMode (boolean mode) {
+	this.slow_mode = mode;
+    }
+
+    /**
+     * debug gate placed at the head of every inbound client and Paxos request.
+     *
+     * freeze is applied first and the slow mode delay second, so that the
+     * delay applies to the request when it is really being processed, the way
+     * a slow machine would behave.
+     *
+     * This method is deliberately NOT synchronized. wait() releases the lock,
+     * so freezing is safe, but Thread.sleep() would hold it for the whole
+     * delay and block every other thread touching this object, the console
+     * included. Both checks therefore take the lock briefly and release it
+     * before anything sleeps.
+     */
+    public void debugGate () {
+	this.waitWhileFrozen ();
+
+	int delay = this.nextSlowDelay ();
+	if (delay > 0) {
+	    try {
+		Thread.sleep (delay);
+	    }
+	    catch (InterruptedException e) {
+		Thread.currentThread().interrupt();
+	    }
+	}
+    }
+
+    private synchronized void waitWhileFrozen () {
 	while (this.debug_mode == DEBUG_FREEZE) {
 	    try {
 		this.wait();
@@ -187,7 +220,14 @@ public class DidaTradeServerState {
 		return;
 	    }
 	}
-	}
+    }
+
+    /* Zero when slow mode is off, otherwise a random delay in milliseconds. */
+    private synchronized int nextSlowDelay () {
+	if (this.slow_mode == false)
+	    return 0;
+	return this.debug_rnd.nextInt (SLOW_MODE_MAX_MS);
+    }
 
     /**
      * pretends this replica crashed, by killing the process.

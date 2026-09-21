@@ -76,7 +76,11 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 
 	int request_id   = request.getReqid();
 	int mode         = request.getMode();
-	this.server_state.setDebugMode (mode);
+
+	// Slow mode lives in its own flag, so that turning it on or off does not
+	// disturb a freeze that is already in place.
+	if ((mode != DidaTradeServerState.DEBUG_SLOW_ON) && (mode != DidaTradeServerState.DEBUG_SLOW_OFF))
+	    this.server_state.setDebugMode (mode);
 
 	// for debug purposes
 	System.out.println("Setting debug mode to = " + this.server_state.getDebugMode());
@@ -96,9 +100,16 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 	    this.server_state.crash();
 	    break;
 	case DidaTradeServerState.DEBUG_NORMAL:
+	    this.server_state.setSlowMode (false);
+	    System.out.println("Debug mode normal: freeze and slow mode cleared");
+	    break;
 	case DidaTradeServerState.DEBUG_SLOW_ON:
+	    this.server_state.setSlowMode (true);
+	    System.out.println("Debug mode slow enabled");
+	    break;
 	case DidaTradeServerState.DEBUG_SLOW_OFF:
-	    System.out.println("Debug mode " + mode + " recorded, not implemented yet");
+	    this.server_state.setSlowMode (false);
+	    System.out.println("Debug mode slow disabled");
 	    break;
 	case DidaTradeServerState.DEBUG_FREEZE:
 	    System.out.println("Debug mode freeze enabled");
