@@ -1,226 +1,189 @@
 package didatrade.server;
 
 import java.util.*;
-
 import didatrade.DidaTradeMain;
 import didatrade.DidaTradePaxos;
 import didatrade.DidaTradePaxosServiceGrpc;
-
 import didatrade.util.GenericResponseCollector;
 import didatrade.util.CollectorStreamObserver;
 import didatrade.util.PhaseOneProcessor;
 import didatrade.util.PhaseTwoResponseProcessor;
-
 import didatrade.configs.ConfigurationScheduler;
-
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
-
-public class MainLoop implements Runnable  {
+public class MainLoop implements Runnable {
     DidaTradeServerState server_state;
-
     private boolean has_work;
-    private int next_log_entry;
-    private List<Integer> all_participants;
-    private int n_participants;
-    private String[] targets;
-    private ManagedChannel[] channels;
-    private DidaTradePaxosServiceGrpc.DidaTradePaxosServiceStub[] async_stubs;
     
+    // Contadores separados para permitir o Pipelining (Multi-Paxos)
+    private int next_instance_to_propose;
+    private int next_instance_to_execute;
     
+    // Variáveis cruciais para o Multi-Paxos
+    private int phase1_completed_ballot;
+    private Set<Integer> proposed_requests;
+
     public MainLoop(DidaTradeServerState state) {
-	this.server_state   = state;
-	this.has_work       = false;
-	this.next_log_entry = -1;
+        this.server_state = state;
+        this.has_work = false;
+        this.next_instance_to_propose = 0;
+        this.next_instance_to_execute = 0;
+        this.phase1_completed_ballot = -1;
+        this.proposed_requests = new HashSet<>();
     }
 
     public void run() {
-	while (true) {
-	    this.next_log_entry++;
-	    this.processEntry(this.next_log_entry);
-	}
+        while (true) {
+            // 1. Executa as instâncias que já atingiram o consenso
+            executeDecided();
+
+            // 2. Tenta propor novos pedidos pendentes rapidamente (Multi-Paxos)
+            proposePending();
+
+            synchronized (this) {
+                if (!this.has_work) {
+                    try { wait(); } catch (InterruptedException e) {}
+                }
+                this.has_work = false;
+            }
+        }
     }
-      
+
     public synchronized void wakeup() {
-	this.has_work = true;
-	notify();    
+        this.has_work = true;
+        notifyAll();
     }
-   
- 
-    public synchronized void processEntry(int entry_number) {
-		
-	PaxosInstance next_entry = this.server_state.paxos_log.testAndSetEntry(entry_number);
 
-	while (next_entry.decided == false) {
-	    RequestRecord request_record   = this.server_state.req_history.getFirstPending();
-	    int           ballot           = this.server_state.getCurrentBallot();
-	    int           completed_ballot = this.server_state.getCompletedBallot();
+    private void proposePending() {
+        int ballot = this.server_state.getCurrentBallot();
+        if (ballot < 0 || this.server_state.scheduler.leader(ballot) != this.server_state.my_id) {
+            return; // Se não sou o líder, não proponho nada
+        }
 
-	    List<Integer> acceptors        = this.server_state.scheduler.acceptors(ballot);
-	    int           quorum           = this.server_state.scheduler.quorum(ballot);
-	    int           n_acceptors      = acceptors.size();
-	    
-	    if ((ballot > -1) && (request_record != null) && (this.server_state.scheduler.leader(ballot)==this.server_state.my_id)) {
-		
-			System.out.println("I am the leader for request with id " + request_record.getId());
-			boolean ballot_aborted   = false;
-			int phase_one_readballot = -1;
-			int phase_two_value      = request_record.getId();
-			
-			// Paxos Phase One
-			System.out.println("Going to run paxos phase 1");
+        while (true) {
+            RequestRecord request_record = this.server_state.req_history.getFirstUnproposed(this.proposed_requests);
+            if (request_record == null) {
+                break; // Acabaram-se os pedidos por propor
+            }
 
+            int instance = this.next_instance_to_propose;
+            PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
 
-			// send phase1
-			DidaTradePaxos.PhaseOneRequest.Builder phase_one_request_builder = DidaTradePaxos.PhaseOneRequest.newBuilder();
-			phase_one_request_builder.setInstance(entry_number);
-			phase_one_request_builder.setRequestballot(ballot);
+            if (entry.decided) {
+                this.next_instance_to_propose++;
+                continue; // Alguém já decidiu esta instância, avança
+            }
 
-			DidaTradePaxos.PhaseOneRequest phase_one_request = phase_one_request_builder.build();
-			System.out.println("Going to send phase 1" + phase_one_request);
-			
-			int low_ballot = Math.max (completed_ballot, 0); 	// last ballot i know that's fully finished. other leaders may have got values accepted between this and high_ballot
-			int high_ballot = ballot; 							// my ballot, the one where i'm about to attempt to commit
+            int phase_two_value = request_record.getId();
+            boolean ballot_aborted = false;
 
-			
-			// phase 1 must hear from the acceptors of every ballot from low to high,
-			// not just of the current one (they differ in Schedule C)
-			List<Integer> phase_one_acceptors = this.server_state.scheduler.acceptorsinrange(low_ballot, high_ballot);
-			int n_phase_one_acceptors = phase_one_acceptors.size();
+            // MULTI-PAXOS: Saltar a Fase 1 (Prepare) se já a fizemos com sucesso neste ballot!
+            if (ballot > this.phase1_completed_ballot) {
+                System.out.println("Multi-Paxos: A correr Fase 1 para a instância " + instance + " (Ballot " + ballot + ")");
+                int low_ballot = Math.max(this.server_state.getCompletedBallot(), 0);
+                List<Integer> phase_one_acceptors = this.server_state.scheduler.acceptorsinrange(low_ballot, ballot);
+                PhaseOneProcessor phase_one_processor = new PhaseOneProcessor(this.server_state.scheduler, low_ballot, ballot);
+                ArrayList<DidaTradePaxos.PhaseOneReply> phase_one_responses = new ArrayList<>();
+                GenericResponseCollector<DidaTradePaxos.PhaseOneReply> phase_one_collector = 
+                        new GenericResponseCollector<>(phase_one_responses, phase_one_acceptors.size(), phase_one_processor);
 
-			PhaseOneProcessor phase_one_processor = new PhaseOneProcessor(this.server_state.scheduler, low_ballot, high_ballot);
-			
-			ArrayList<DidaTradePaxos.PhaseOneReply> phase_one_responses = new ArrayList<DidaTradePaxos.PhaseOneReply>();
-			GenericResponseCollector<DidaTradePaxos.PhaseOneReply>  phase_one_collector = new GenericResponseCollector<DidaTradePaxos.PhaseOneReply>(phase_one_responses, n_phase_one_acceptors, phase_one_processor);
-			
-			for (int i = 0; i < n_phase_one_acceptors; i++) {
-				CollectorStreamObserver<DidaTradePaxos.PhaseOneReply> phase_one_observer  = new CollectorStreamObserver<DidaTradePaxos.PhaseOneReply>(phase_one_collector);
-				this.server_state.async_stubs[phase_one_acceptors.get(i)].phaseone(phase_one_request, phase_one_observer);
-			}
-			
-			
-			phase_one_collector.waitUntilDone();
-			if (phase_one_processor.getAccepted() == false) {
-				ballot_aborted = true;
-				int maxballot = phase_one_processor.getMaxballot();
-				if (maxballot > this.server_state.getCurrentBallot())
-				this.server_state.setCurrentBallot(maxballot);
-			}
-			else if (phase_one_processor.getValballot() > -1)
-				phase_two_value = phase_one_processor.getValue();
+                DidaTradePaxos.PhaseOneRequest p1_req = DidaTradePaxos.PhaseOneRequest.newBuilder()
+                        .setInstance(instance).setRequestballot(ballot).build();
 
-			
-			System.out.println("Paxos phase 1 ended with aborted = " + ballot_aborted + " and read ballot = " + phase_one_processor.getValballot() + " and value " + phase_two_value);
+                for (int target : phase_one_acceptors) {
+                    CollectorStreamObserver<DidaTradePaxos.PhaseOneReply> obs = new CollectorStreamObserver<>(phase_one_collector);
+                    this.server_state.async_stubs[target].phaseone(p1_req, obs);
+                }
+                phase_one_collector.waitUntilDone();
 
+                if (!phase_one_processor.getAccepted()) {
+                    ballot_aborted = true;
+                    if (phase_one_processor.getMaxballot() > this.server_state.getCurrentBallot()) {
+                        this.server_state.setCurrentBallot(phase_one_processor.getMaxballot());
+                    }
+                } else {
+                    if (phase_one_processor.getValballot() > -1) {
+                        phase_two_value = phase_one_processor.getValue();
+                    }
+                    this.phase1_completed_ballot = ballot; 
+                }
+            }
 
-			// Paxos Phase Two
-			if (ballot_aborted == false) {			
-				System.out.println("Going to run paxos phase 2");
-			
-				// send phase2
-				DidaTradePaxos.PhaseTwoRequest.Builder phase_two_request = DidaTradePaxos.PhaseTwoRequest.newBuilder();
-				phase_two_request.setInstance(entry_number);
-				phase_two_request.setRequestballot(ballot);
-				phase_two_request.setValue(phase_two_value);
+            // MULTI-PAXOS: Fase 2 Assíncrona (Pipelining)
+            if (!ballot_aborted) {
+                System.out.println("Multi-Paxos: A enviar Fase 2 assíncrona para a instância " + instance);
+                List<Integer> acceptors = this.server_state.scheduler.acceptors(ballot);
+                PhaseTwoResponseProcessor phase_two_processor = new PhaseTwoResponseProcessor(this.server_state.scheduler.quorum(ballot));
+                ArrayList<DidaTradePaxos.PhaseTwoReply> phase_two_responses = new ArrayList<>();
+                GenericResponseCollector<DidaTradePaxos.PhaseTwoReply> phase_two_collector = 
+                        new GenericResponseCollector<>(phase_two_responses, acceptors.size(), phase_two_processor);
 
+                DidaTradePaxos.PhaseTwoRequest p2_req = DidaTradePaxos.PhaseTwoRequest.newBuilder()
+                        .setInstance(instance).setRequestballot(ballot).setValue(phase_two_value).build();
 
-				PhaseTwoResponseProcessor phase_two_processor = new PhaseTwoResponseProcessor(quorum);
-				
-				System.out.println("Calling peers with phase_two_request = " + phase_two_request);
-				ArrayList<DidaTradePaxos.PhaseTwoReply> phase_two_responses = new ArrayList<DidaTradePaxos.PhaseTwoReply>();
-				GenericResponseCollector<DidaTradePaxos.PhaseTwoReply> phase_two_collector = new GenericResponseCollector<DidaTradePaxos.PhaseTwoReply>(phase_two_responses, n_acceptors, phase_two_processor);
-				for (int i = 0; i < n_acceptors  ; i++) {
-					CollectorStreamObserver<DidaTradePaxos.PhaseTwoReply> phase_two_observer = new CollectorStreamObserver<DidaTradePaxos.PhaseTwoReply>(phase_two_collector);
-					this.server_state.async_stubs[acceptors.get(i)].phasetwo(phase_two_request.build(), phase_two_observer);
-				}
-				
-				System.out.println("Waiting for responses...");
-				phase_two_collector.waitUntilDone();
-				if (phase_two_processor.getAccepted() == false) {
-					ballot_aborted = true;
-					this.server_state.setCurrentBallot (phase_two_processor.getMaxballot());
-				}
-				System.out.println("Paxos phase 2 ended with ballot_aborted = " + ballot_aborted);
-				}
+                for (int target : acceptors) {
+                    CollectorStreamObserver<DidaTradePaxos.PhaseTwoReply> obs = new CollectorStreamObserver<>(phase_two_collector);
+                    this.server_state.async_stubs[target].phasetwo(p2_req, obs);
+                }
 
-			// After phase2
-			if (ballot_aborted == false) {
-				this.server_state.setCompletedBallot(ballot);
-				next_entry.command_id    = phase_two_value;
-				next_entry.decided       = true;
-			}
-	    }
+                if (phase_two_value == request_record.getId()) {
+                    this.proposed_requests.add(request_record.getId());
+                }
+                this.next_instance_to_propose++;
+                
+            } else {
+                break; // Perdemos a liderança ou fomos abortados
+            }
+        }
+    }
 
-	    if (next_entry.decided == false) {
-		System.out.println("Entry not decided: waiting");
-		this.has_work = false;
-		while (this.has_work == false) {
-		    try {
-			wait ();
-		    }
-		    catch (InterruptedException e) {
-		    }
-		}
-	    }
-	    
-	}
+    private void executeDecided() {
+        while (true) {
+            PaxosInstance entry = this.server_state.paxos_log.getEntry(this.next_instance_to_execute);
+            if (entry == null || !entry.decided) {
+                break; // Ainda não atingiu o quórum
+            }
 
+            RequestRecord request_record = this.server_state.req_history.getIfPending(entry.command_id);
+            if (request_record == null) {
+                // A instância está decidida na rede, mas o pedido gRPC do cliente ainda não 
+                // chegou a esta réplica específica. Sai e espera que o wakeup() seja chamado.
+                break; 
+            }
 
-	System.out.println("Log entry with number " + this.next_log_entry + " has been decided with command id = "+ next_entry.command_id);
-	RequestRecord request_record = this.server_state.req_history.getIfPending(next_entry.command_id);
-	// if I receive the paxos decision before the request
-	while (request_record == null) {
-	    System.out.println("Record not available!");
-	    try {
-		wait ();
-	    }
-	    catch (InterruptedException e) {
-	    }
-	    request_record = this.server_state.req_history.getIfPending(next_entry.command_id);
-	}
+            System.out.println("Multi-Paxos: Executar instância decidida " + this.next_instance_to_execute + " (Command ID = " + entry.command_id + ")");
+            DidaTradeCommand command = request_record.getRequest();
+            boolean result = false;
+            int balance = 0;
+            DidaTradeAction action = command.getAction();
 
-	// exec request in entry
-	// System.out.println("Going to process command with id = " + next_entry.command_id);
+            switch (action) {
+                case POPULATE: result = this.server_state.trade_manager.populate(command.getQuantity()); break;
+                case ADDUSER: result = this.server_state.trade_manager.add_user(command.getUserId(), command.getQuantity(), command.getStock()); break;
+                case SELL: result = this.server_state.trade_manager.sell(command.getUserId(), command.getQuantity()); break;
+                case BUY: result = this.server_state.trade_manager.acquire(command.getUserId(), command.getQuantity()); break;
+                case BALANCE:
+                    balance = this.server_state.trade_manager.balance(command.getUserId());
+                    command.setQuantity(balance);
+                    result = (balance != -1);
+                    break;
+                case DUMP:
+                    this.server_state.trade_manager.dump();
+                    result = true;
+                    break;
+                default:
+                    result = false;
+                    System.err.println("*** Unknown command ****");
+                    break;
+            }
 
-	DidaTradeCommand  command = request_record.getRequest();
-	boolean result = false;
-	int     balance = 0;
-	
-	DidaTradeAction  action = command.getAction();
+            // Fecha a transação
+            request_record.setResponse(result);
+            this.server_state.req_history.moveToProcessed(request_record.getId());
+            this.proposed_requests.remove(request_record.getId());
 
-	// System.out.println("Action  = " + action);
-	switch (action) {
-	case DidaTradeAction.POPULATE:
-	    result = this.server_state.trade_manager.populate(command.getQuantity());
-	    break;
-	case DidaTradeAction.ADDUSER:
-	    result = this.server_state.trade_manager.add_user(command.getUserId(), command.getQuantity(), command.getStock());
-	    break;
-	case DidaTradeAction.SELL:
-	    result = this.server_state.trade_manager.sell(command.getUserId(), command.getQuantity());
-	    break;
-	case DidaTradeAction.BUY:
-	    result = this.server_state.trade_manager.acquire(command.getUserId(), command.getQuantity());
-	    break;
-	case DidaTradeAction.BALANCE:
-	    balance = this.server_state.trade_manager.balance(command.getUserId());
-	    command.setQuantity(balance);
-	    result = (balance != -1);
-	    break;
-	case DidaTradeAction.DUMP:
-	    this.server_state.trade_manager.dump();
-	    result = true;
-	    break;
-	default:
-	    result = false;
-	    System.err.println("*** Unknown command ****");
-	    break;
-	}
-
-	// sending response
-	System.out.println("Setting response for command with id = " + next_entry.command_id + " with result = " + result);
-	request_record.setResponse(result);
-	this.server_state.req_history.moveToProcessed(request_record.getId());
+            this.next_instance_to_execute++; // Avança estritamente em ordem 0, 1, 2...
+        }
     }
 }
