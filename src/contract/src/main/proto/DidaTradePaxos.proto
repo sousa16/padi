@@ -9,6 +9,12 @@ message PhaseOneRequest {
   int32 requestballot	= 2;
 }
 
+message LogEntry {
+  int32 position     = 1;
+  int32 ballot       = 2;
+  int32 command_id   = 3;
+}
+
 message PhaseOneReply {
   int32 instance        = 1;
   int32 serverid        = 2;
@@ -17,12 +23,14 @@ message PhaseOneReply {
   int32 value           = 5;
   int32 valballot       = 6;
   int32 maxballot       = 7;
+  repeated LogEntry log  = 8;
 }
 
 message PhaseTwoRequest {
   int32 instance        = 1;
   int32 requestballot   = 2;
   int32 value           = 3;
+  repeated LogEntry log  = 4;
 }
 
 message PhaseTwoReply {
@@ -31,6 +39,7 @@ message PhaseTwoReply {
   int32 requestballot   = 3;
   bool  accepted        = 4;
   int32 maxballot       = 5;
+  repeated LogEntry log  = 6;
 }
 
 message LearnRequest {

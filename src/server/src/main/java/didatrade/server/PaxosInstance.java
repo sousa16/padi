@@ -44,4 +44,15 @@ public class PaxosInstance {
 	this.decided         = false;
         this.value_is_locked = false;
     }
+
+    public PaxosInstance(int id, int ballot, int command_id) {
+	this.instance_nb     = id;
+        this.command_id      = command_id;
+        this.read_ballot     = ballot;
+        this.write_ballot    = ballot;
+	this.accept_ballot   = ballot;
+        this.n_accepts       = 1;
+	this.decided         = true;
+        this.value_is_locked = true;
+    }
 }

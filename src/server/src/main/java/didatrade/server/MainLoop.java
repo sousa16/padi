@@ -97,6 +97,17 @@ public class MainLoop implements Runnable {
                 }
                 phase_one_collector.waitUntilDone();
 
+                Map<Integer, PaxosInstance> merged_log = new HashMap<Integer, PaxosInstance>();
+                for (DidaTradePaxos.PhaseOneReply reply : phase_one_responses) {
+                    for (DidaTradePaxos.LogEntry log_entry : reply.getLogList()) {
+                        PaxosInstance existing = merged_log.get(log_entry.getPosition());
+                        if (existing == null || log_entry.getBallot() > existing.accept_ballot ||
+                                (log_entry.getBallot() == existing.accept_ballot && log_entry.getCommandId() > existing.command_id)) {
+                            merged_log.put(log_entry.getPosition(), new PaxosInstance(log_entry.getPosition(), log_entry.getBallot(), log_entry.getCommandId()));
+                        }
+                    }
+                }
+
                 if (!phase_one_processor.getAccepted()) {
                     ballot_aborted = true;
                     if (phase_one_processor.getMaxballot() > this.server_state.getCurrentBallot()) {
@@ -106,7 +117,15 @@ public class MainLoop implements Runnable {
                     if (phase_one_processor.getValballot() > -1) {
                         phase_two_value = phase_one_processor.getValue();
                     }
+                    if (!merged_log.containsKey(instance)) {
+                        merged_log.put(instance, new PaxosInstance(instance, ballot, phase_two_value));
+                    }
                     this.phase1_completed_ballot = ballot; 
+                }
+
+                this.server_state.paxos_log.getEntry(instance);
+                for (Map.Entry<Integer, PaxosInstance> merged_entry : merged_log.entrySet()) {
+                    this.server_state.paxos_log.applyLogEntry(merged_entry.getKey(), merged_entry.getValue().accept_ballot, merged_entry.getValue().command_id);
                 }
             }
 
@@ -119,8 +138,29 @@ public class MainLoop implements Runnable {
                 GenericResponseCollector<DidaTradePaxos.PhaseTwoReply> phase_two_collector = 
                         new GenericResponseCollector<>(phase_two_responses, acceptors.size(), phase_two_processor);
 
-                DidaTradePaxos.PhaseTwoRequest p2_req = DidaTradePaxos.PhaseTwoRequest.newBuilder()
-                        .setInstance(instance).setRequestballot(ballot).setValue(phase_two_value).build();
+                DidaTradePaxos.PhaseTwoRequest.Builder p2_builder = DidaTradePaxos.PhaseTwoRequest.newBuilder()
+                        .setInstance(instance).setRequestballot(ballot).setValue(phase_two_value);
+
+                List<Integer> positions = new ArrayList<Integer>(this.server_state.paxos_log.snapshotLog().size());
+                for (PaxosInstance log_entry : this.server_state.paxos_log.snapshotLog()) {
+                    positions.add(log_entry.instance_nb);
+                }
+                Collections.sort(positions);
+
+                for (Integer pos : positions) {
+                    PaxosInstance log_entry = this.server_state.paxos_log.getEntry(pos);
+                    if (log_entry == null) {
+                        continue;
+                    }
+                    DidaTradePaxos.LogEntry log_message = DidaTradePaxos.LogEntry.newBuilder()
+                            .setPosition(log_entry.instance_nb)
+                            .setBallot(log_entry.accept_ballot)
+                            .setCommandId(log_entry.command_id)
+                            .build();
+                    p2_builder.addLog(log_message);
+                }
+
+                DidaTradePaxos.PhaseTwoRequest p2_req = p2_builder.build();
 
                 for (int target : acceptors) {
                     CollectorStreamObserver<DidaTradePaxos.PhaseTwoReply> obs = new CollectorStreamObserver<>(phase_two_collector);
