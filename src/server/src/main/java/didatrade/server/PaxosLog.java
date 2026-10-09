@@ -22,8 +22,12 @@ public class PaxosLog {
         return this.log.get(position);
     }
 
-    public synchronized List<PaxosInstance> snapshotLog() {
-        List<PaxosInstance> entries = new ArrayList<PaxosInstance>(this.log.values());
+    /* entries at position >= from, in order of position. */
+    public synchronized List<PaxosInstance> snapshotFrom(int from) {
+        List<PaxosInstance> entries = new ArrayList<PaxosInstance>();
+        for (PaxosInstance entry : this.log.values())
+            if (entry.instance_nb >= from)
+                entries.add(entry);
         Collections.sort(entries, new Comparator<PaxosInstance>() {
             @Override
             public int compare(PaxosInstance left, PaxosInstance right) {
@@ -31,22 +35,6 @@ public class PaxosLog {
             }
         });
         return entries;
-    }
-
-    public synchronized void applyLogEntry(int position, int ballot, int command_id) {
-        PaxosInstance entry = this.log.get(position);
-        if (entry == null) {
-            entry = new PaxosInstance(position);
-            this.log.put(position, entry);
-        }
-
-        if (ballot >= entry.accept_ballot) {
-            entry.command_id = command_id;
-            entry.accept_ballot = ballot;
-            entry.write_ballot = ballot;
-            entry.decided = true;
-            entry.n_accepts = Math.max(entry.n_accepts, 1);
-        }
     }
    
    

@@ -52,12 +52,19 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	response_builder.setValballot(valballot);
 	response_builder.setMaxballot(maxballot);
 
-	for (PaxosInstance log_entry : this.server_state.paxos_log.snapshotLog()) {
-	    DidaTradePaxos.LogEntry.Builder log_entry_builder = DidaTradePaxos.LogEntry.newBuilder();
-	    log_entry_builder.setPosition(log_entry.instance_nb);
-	    log_entry_builder.setBallot(Math.max(log_entry.accept_ballot, log_entry.write_ballot));
-	    log_entry_builder.setCommandId(log_entry.command_id);
-	    response_builder.addLog(log_entry_builder.build());
+	// Multi-Paxos: the promise covers every instance from `instance` onwards,
+	// so send back everything this acceptor has accepted (or knows to be
+	// decided) from there. The new leader must re-propose these values.
+	if (accepted) {
+	    for (PaxosInstance log_entry : this.server_state.paxos_log.snapshotFrom(instance)) {
+		if (log_entry.write_ballot < 0 && !log_entry.decided)
+		    continue;
+		DidaTradePaxos.LogEntry.Builder log_entry_builder = DidaTradePaxos.LogEntry.newBuilder();
+		log_entry_builder.setPosition(log_entry.instance_nb);
+		log_entry_builder.setBallot(Math.max(log_entry.accept_ballot, log_entry.write_ballot));
+		log_entry_builder.setCommandId(log_entry.command_id);
+		response_builder.addLog(log_entry_builder.build());
+	    }
 	}
 
 	DidaTradePaxos.PhaseOneReply response = response_builder.build();
@@ -79,12 +86,6 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	boolean accepted      = false;
 	int  maxballot        = ballot;
 
-	if (request.getLogCount() > 0) {
-	    for (DidaTradePaxos.LogEntry log_entry : request.getLogList()) {
-		this.server_state.paxos_log.applyLogEntry(log_entry.getPosition(), ballot, log_entry.getCommandId());
-	    }
-	}
-
 	if (ballot >= this.server_state.getCurrentBallot()) {
 	    accepted           = true;
 	    entry.command_id   = value;
@@ -101,14 +102,6 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	response_builder.setServerid(this.server_state.my_id);
 	response_builder.setRequestballot(ballot);
 	response_builder.setMaxballot(maxballot);
-
-	for (PaxosInstance log_entry : this.server_state.paxos_log.snapshotLog()) {
-	    DidaTradePaxos.LogEntry.Builder log_entry_builder = DidaTradePaxos.LogEntry.newBuilder();
-	    log_entry_builder.setPosition(log_entry.instance_nb);
-	    log_entry_builder.setBallot(Math.max(log_entry.accept_ballot, log_entry.write_ballot));
-	    log_entry_builder.setCommandId(log_entry.command_id);
-	    response_builder.addLog(log_entry_builder.build());
-	}
 
 	DidaTradePaxos.PhaseTwoReply response = response_builder.build();
 	
@@ -161,21 +154,21 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 
 	    this.server_state.setCurrentBallot(ballot);
 	    
-	    if (ballot == entry.accept_ballot) {
+	    if (ballot > entry.accept_ballot && !entry.decided) {
+		System.out.println("Paxos learner for instance " + instance + " : resetting ");
+		entry.command_id     = value;
+		entry.accept_ballot  = ballot;
+		entry.n_accepts      = 0;
+	    }
+	    if (ballot == entry.accept_ballot && !entry.decided) {
 		entry.n_accepts++;
 		System.out.println("Paxos learner for instance " + instance + " : number of accepts " +  entry.n_accepts);
 		if (entry.n_accepts >= this.server_state.scheduler.quorum(ballot)) {
 		    System.out.println("Paxos learner: waking up the main loop");
-		    this.server_state.updateCompletedBallot(ballot);
 		    entry.decided = true;
+		    this.server_state.updateCompletedBallot(ballot);
 		    this.server_state.main_loop.wakeup ();
 		}
-	    }
-	    else if (ballot > entry.accept_ballot) {
-		System.out.println("Paxos learner for instance " + instance + " : resetting ");
-		entry.command_id     = value;
-		entry.accept_ballot  = ballot;
-		entry.n_accepts      = 1;
 	    }
 	}
 	

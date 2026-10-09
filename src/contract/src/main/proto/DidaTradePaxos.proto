@@ -4,11 +4,14 @@
 syntax = "proto3";
 package didatrade;
 
+// Multi-Paxos: phase 1 runs once per ballot and covers every instance from
+// `instance` onwards, so the acceptor answers with its log from that point.
 message PhaseOneRequest {
   int32 instance        = 1;
   int32 requestballot	= 2;
 }
 
+// One accepted (or decided) value in an acceptor's log.
 message LogEntry {
   int32 position     = 1;
   int32 ballot       = 2;
@@ -30,7 +33,6 @@ message PhaseTwoRequest {
   int32 instance        = 1;
   int32 requestballot   = 2;
   int32 value           = 3;
-  repeated LogEntry log  = 4;
 }
 
 message PhaseTwoReply {
@@ -39,7 +41,6 @@ message PhaseTwoReply {
   int32 requestballot   = 3;
   bool  accepted        = 4;
   int32 maxballot       = 5;
-  repeated LogEntry log  = 6;
 }
 
 message LearnRequest {
