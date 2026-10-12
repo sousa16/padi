@@ -50,6 +50,10 @@ public class DidaTradeServerState {
     private boolean             slow_mode;
     private Random              debug_rnd;
     private boolean             fastpaxos_on;
+
+    /* Latest "any" from a fast ballot's leader: instances >= fast_any_from are open to every proposer. */
+    private int                 fast_any_ballot = -1;
+    private int                 fast_any_from   = 0;
  
     MainLoop                    main_loop;
     Thread                      main_loop_worker;
@@ -155,6 +159,21 @@ public class DidaTradeServerState {
 	    }
 	}
 	return this.completed_ballot;
+    }
+
+    public synchronized void openFastBallot (int ballot, int from) {
+	if (ballot > this.fast_any_ballot) {
+	    this.fast_any_ballot = ballot;
+	    this.fast_any_from   = from;
+	}
+    }
+
+    public synchronized int getFastAnyBallot () {
+	return this.fast_any_ballot;
+    }
+
+    public synchronized int getFastAnyFrom () {
+	return this.fast_any_from;
     }
 
     public synchronized boolean getFastPaxosMode () {

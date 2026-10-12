@@ -29,10 +29,14 @@ message PhaseOneReply {
   repeated LogEntry log  = 8;
 }
 
+// In a fast ballot, `any` is the leader telling everyone that every instance
+// from `instance` onwards is open: any proposer may send its own value there
+// directly to the acceptors. It carries no value and is not a vote.
 message PhaseTwoRequest {
   int32 instance        = 1;
   int32 requestballot   = 2;
   int32 value           = 3;
+  bool  any             = 4;
 }
 
 message PhaseTwoReply {
@@ -43,10 +47,14 @@ message PhaseTwoReply {
   int32 maxballot       = 5;
 }
 
+// Sent by an acceptor to every learner each time it votes. `serverid` lets a
+// learner count each acceptor once per value, which fast ballots need because
+// acceptors may vote for different values in the same instance.
 message LearnRequest {
   int32 instance   = 1;
   int32 ballot     = 2;
   int32 value      = 3;
+  int32 serverid   = 4;
 }
 
 message LearnReply {

@@ -18,6 +18,10 @@ import io.grpc.Context;
 public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTradePaxosServiceImplBase {
     DidaTradeServerState server_state;
 
+    // phaseone and phasetwo read-modify-write the same acceptor state, and in a
+    // fast ballot several proposers hit the same instance concurrently
+    private final Object acceptor_lock = new Object();
+
     public DidaTradePaxosServiceImpl(DidaTradeServerState state) {
 	this.server_state = state;
     }
@@ -30,18 +34,22 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 
 	int instance          = request.getInstance();
 	int ballot            = request.getRequestballot();
-	PaxosInstance entry   = this.server_state.paxos_log.testAndSetEntry(instance, ballot);
 	boolean accepted      = false;
-	int  value            = entry.command_id;
-	int  valballot        = entry.write_ballot;
+	int  value, valballot, maxballot;
 
-	if (ballot >= this.server_state.getCurrentBallot()) {
-	    accepted = true;
-	    this.server_state.setCurrentBallot(ballot);
-	    entry.read_ballot = ballot;
+	synchronized (acceptor_lock) {
+	    PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance, ballot);
+	    value               = entry.command_id;
+	    valballot           = entry.write_ballot;
+
+	    if (ballot >= this.server_state.getCurrentBallot()) {
+		accepted = true;
+		this.server_state.setCurrentBallot(ballot);
+		entry.read_ballot = ballot;
+	    }
+
+	    maxballot = this.server_state.getCurrentBallot();
 	}
-
-	int maxballot = this.server_state.getCurrentBallot();
 
 	DidaTradePaxos.PhaseOneReply.Builder response_builder = DidaTradePaxos.PhaseOneReply.newBuilder();
 	response_builder.setInstance(instance);
@@ -61,8 +69,16 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    continue;
 		DidaTradePaxos.LogEntry.Builder log_entry_builder = DidaTradePaxos.LogEntry.newBuilder();
 		log_entry_builder.setPosition(log_entry.instance_nb);
-		log_entry_builder.setBallot(Math.max(log_entry.accept_ballot, log_entry.write_ballot));
-		log_entry_builder.setCommandId(log_entry.command_id);
+		// A decided value is final. Otherwise report this acceptor's own vote
+		// (value + the ballot it was cast in), never what it merely learned.
+		if (log_entry.decided) {
+		    log_entry_builder.setBallot(log_entry.accept_ballot);
+		    log_entry_builder.setCommandId(log_entry.decided_value);
+		}
+		else {
+		    log_entry_builder.setBallot(log_entry.write_ballot);
+		    log_entry_builder.setCommandId(log_entry.command_id);
+		}
 		response_builder.addLog(log_entry_builder.build());
 	    }
 	}
@@ -82,19 +98,42 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	int instance          = request.getInstance();
 	int ballot            = request.getRequestballot();
 	int value             = request.getValue();
-	PaxosInstance entry   = this.server_state.paxos_log.testAndSetEntry(instance);
 	boolean accepted      = false;
 	int  maxballot        = ballot;
+	boolean is_any        = request.getAny();
 
-	if (ballot >= this.server_state.getCurrentBallot()) {
-	    accepted           = true;
-	    entry.command_id   = value;
-	    entry.write_ballot = ballot;
-	    this.server_state.setCurrentBallot(ballot);
+	synchronized (acceptor_lock) {
+	    if (ballot < this.server_state.getCurrentBallot()) {
+		maxballot = this.server_state.getCurrentBallot();
+	    }
+	    else if (is_any) {
+		// Fast Paxos "any": no value and no vote, just opens the instances from here on
+		accepted = true;
+		this.server_state.setCurrentBallot(ballot);
+		this.server_state.openFastBallot(ballot, instance);
+	    }
+	    else {
+		PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
+		if (this.server_state.scheduler.fastpaxos(ballot) && entry.write_ballot == ballot && entry.command_id != value) {
+		    // fast ballot: the first value voted for in an instance is the only one, a different proposal is a collision
+		    maxballot = this.server_state.getCurrentBallot();
+		}
+		else {
+		    accepted           = true;
+		    entry.command_id   = value;
+		    entry.write_ballot = ballot;
+		    this.server_state.setCurrentBallot(ballot);
+		}
+	    }
 	}
-	else
-	    maxballot = this.server_state.getCurrentBallot();
-	
+
+	if (is_any) {
+	    if (accepted)
+		this.server_state.main_loop.wakeup();
+	}
+	else if (accepted) {
+	    this.server_state.main_loop.noteVote(instance, ballot, value);
+	}
 
 	DidaTradePaxos.PhaseTwoReply.Builder response_builder = DidaTradePaxos.PhaseTwoReply.newBuilder();
 	response_builder.setAccepted(accepted);
@@ -108,8 +147,8 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
 	
-	// Notify learners
-	if (accepted == true) {
+	// Notify learners (an "any" is not a vote)
+	if (accepted == true && !is_any) {
 	    
 	    Context ctx = Context.current().fork();
 	    ctx.run(() -> {
@@ -120,6 +159,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    learn_request_builder.setInstance(instance);
 		    learn_request_builder.setValue(value);
 		    learn_request_builder.setBallot(ballot);
+		    learn_request_builder.setServerid(this.server_state.my_id);
 		    
 		    DidaTradePaxos.LearnRequest learn_request = learn_request_builder.build();
 		    
@@ -145,28 +185,42 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	int instance         = request.getInstance();
 	int ballot           = request.getBallot();
 	int value            = request.getValue();
+	int acceptor         = request.getServerid();
 
-	
 	synchronized (this) {
 	    PaxosInstance entry  = this.server_state.paxos_log.testAndSetEntry(instance);
-	    
-	    // System.out.println("Paxos learner: learnin entry " + instance + " with timestamp " + ballot);
 
 	    this.server_state.setCurrentBallot(ballot);
-	    
+
 	    if (ballot > entry.accept_ballot && !entry.decided) {
-		System.out.println("Paxos learner for instance " + instance + " : resetting ");
-		entry.command_id     = value;
-		entry.accept_ballot  = ballot;
-		entry.n_accepts      = 0;
+		// a higher ballot supersedes whatever was being tallied
+		entry.accept_ballot = ballot;
+		entry.votes.clear();
 	    }
 	    if (ballot == entry.accept_ballot && !entry.decided) {
-		entry.n_accepts++;
-		System.out.println("Paxos learner for instance " + instance + " : number of accepts " +  entry.n_accepts);
-		if (entry.n_accepts >= this.server_state.scheduler.quorum(ballot)) {
-		    System.out.println("Paxos learner: waking up the main loop");
-		    entry.decided = true;
+		// count each acceptor once per value, so a value is decided only when
+		// enough distinct acceptors voted for that same value
+		Set<Integer> voters = entry.votes.get(value);
+		if (voters == null) {
+		    voters = new HashSet<Integer>();
+		    entry.votes.put(value, voters);
+		}
+		voters.add(acceptor);
+		System.out.println("Paxos learner for instance " + instance + " ballot " + ballot + " : value " + value + " has " + voters.size() + " votes");
+
+		if (voters.size() >= this.server_state.scheduler.decisionquorum(ballot)) {
+		    System.out.println("Paxos learner: instance " + instance + " decided (Command ID = " + value + ")");
+		    entry.decided_value = value;
+		    entry.decided       = true;
 		    this.server_state.updateCompletedBallot(ballot);
+		    this.server_state.main_loop.wakeup ();
+		}
+		else if (collided(entry, ballot)) {
+		    // No value can reach the fast quorum any more in this ballot. Moving
+		    // to the next ballot is safe, its phase 1 recovers anything that may
+		    // have been chosen.
+		    System.out.println("Paxos learner: collision in instance " + instance + ", moving to ballot " + (ballot + 1));
+		    this.server_state.setCurrentBallot(ballot + 1);
 		    this.server_state.main_loop.wakeup ();
 		}
 	    }
@@ -182,6 +236,21 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
+    }
+
+    /* Fast ballots only: true when no value can still collect a decision quorum. */
+    private boolean collided(PaxosInstance entry, int ballot) {
+	if (!this.server_state.scheduler.fastpaxos(ballot))
+	    return false;
+	int needed    = this.server_state.scheduler.decisionquorum(ballot);
+	int voted     = 0;
+	int best      = 0;
+	for (Set<Integer> voters : entry.votes.values()) {
+	    voted += voters.size();
+	    best   = Math.max(best, voters.size());
+	}
+	int missing = this.server_state.scheduler.acceptors(ballot).size() - voted;
+	return best + missing < needed;
     }
 
 }

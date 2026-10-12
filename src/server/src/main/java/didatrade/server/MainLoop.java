@@ -1,6 +1,7 @@
 package didatrade.server;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import didatrade.DidaTradeMain;
 import didatrade.DidaTradePaxos;
 import didatrade.DidaTradePaxosServiceGrpc;
@@ -16,6 +17,10 @@ public class MainLoop implements Runnable {
     // Valor proposto para buracos no log recuperado na Fase 1 (no-op)
     static final int NOOP = -1;
     private static final long PHASE_ONE_RETRY_MS = 1000;
+    // Fast ballots need every acceptor (fast quorum = 3 of 3 in schedule A): if proposals
+    // sit undecided this long, give up on the ballot and let the next one's phase 1 sort it out
+    private static final long FAST_STALL_MS = 3000;
+    private static final long FAST_POLL_MS  = 500;
 
     DidaTradeServerState server_state;
     private boolean has_work;
@@ -26,7 +31,12 @@ public class MainLoop implements Runnable {
 
     // Variáveis cruciais para o Multi-Paxos
     private int phase1_completed_ballot;
+    // Tocado pelo main loop e pelas threads do aceitador (noteVote), logo concorrente
     private Set<Integer> proposed_requests;
+    // Fast-Paxos: ballot rápido em que este servidor já está a propor, e o que propôs/viu votar por instância
+    private volatile int fast_proposer_ballot;
+    private Map<Integer, Integer> fast_marks;
+    private long fast_stall_since;
     // Fase 1 falhou sem haver um ballot maior (ex.: aceitadores inalcançáveis): tenta de novo
     private boolean retry_phase_one;
 
@@ -36,20 +46,28 @@ public class MainLoop implements Runnable {
         this.next_instance_to_propose = 0;
         this.next_instance_to_execute = 0;
         this.phase1_completed_ballot = -1;
-        this.proposed_requests = new HashSet<>();
+        this.proposed_requests = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+        this.fast_proposer_ballot = -1;
+        this.fast_marks = new ConcurrentHashMap<>();
+        this.fast_stall_since = 0;
     }
 
     public void run() {
         while (true) {
             // 1. Executa as instâncias que já atingiram o consenso
+            settleFastMarks();
             executeDecided();
 
             // 2. Tenta propor novos pedidos pendentes rapidamente (Multi-Paxos)
             proposePending();
 
+            // 3. Fast-Paxos: se nada se decide, passa ao ballot seguinte
+            checkFastStall();
+
             synchronized (this) {
                 if (!this.has_work) {
-                    try { wait(this.retry_phase_one ? PHASE_ONE_RETRY_MS : 0); } catch (InterruptedException e) {}
+                    long timeout = this.retry_phase_one ? PHASE_ONE_RETRY_MS : (this.fast_marks.isEmpty() ? 0 : FAST_POLL_MS);
+                    try { wait(timeout); } catch (InterruptedException e) {}
                 }
                 this.has_work = false;
             }
@@ -67,13 +85,24 @@ public class MainLoop implements Runnable {
 
     private void proposePending() {
         int ballot = this.server_state.getCurrentBallot();
-        if (!isLeader(ballot)) {
-            return; // Se não sou o líder, não proponho nada
+        boolean leader = isLeader(ballot);
+        boolean fast = this.server_state.scheduler.fastpaxos(ballot);
+        // FAST-PAXOS: num ballot rápido qualquer servidor propõe, mas só depois do "any" do líder
+        if (!leader && !(fast && this.server_state.getFastAnyBallot() == ballot)) {
+            return; // Se não sou o líder (nem proponente rápido), não proponho nada
+        }
+
+        // Saímos de um ballot rápido (colisão ou timeout): as propostas dele não contam para o
+        // novo ballot, a Fase 1 recupera o que ficou votado e o resto volta a ser proposto
+        if (this.fast_proposer_ballot != -1 && this.fast_proposer_ballot != ballot) {
+            this.proposed_requests.clear();
+            this.fast_marks.clear();
+            this.fast_proposer_ballot = -1;
         }
 
         // MULTI-PAXOS: a Fase 1 corre uma única vez por ballot e cobre todas as instâncias
         this.retry_phase_one = false;
-        if (ballot > this.phase1_completed_ballot) {
+        if (leader && ballot > this.phase1_completed_ballot) {
             if (this.server_state.req_history.getFirstUnproposed(this.proposed_requests) == null) {
                 return; // Nada para propor: a Fase 1 espera pelo primeiro pedido
             }
@@ -82,6 +111,15 @@ public class MainLoop implements Runnable {
                 this.retry_phase_one = (this.server_state.getCurrentBallot() == ballot);
                 return;
             }
+            if (fast) {
+                // Recuperadas as instâncias antigas, abre todas as seguintes a qualquer proponente
+                this.fast_marks.clear();
+                this.fast_proposer_ballot = ballot;
+                sendAny(ballot, this.next_instance_to_propose);
+            }
+        }
+        if (fast && this.fast_proposer_ballot != ballot) {
+            enterFastBallot(ballot);
         }
 
         while (this.server_state.getCurrentBallot() == ballot) {
@@ -92,14 +130,95 @@ public class MainLoop implements Runnable {
 
             int instance = this.next_instance_to_propose;
             PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
-            if (entry.decided) {
+            if (entry.decided || (fast && entry.write_ballot == ballot)) {
                 this.next_instance_to_propose++;
-                continue; // Alguém já decidiu esta instância, avança
+                continue; // Já decidida, ou (ballot rápido) já votada por outro proponente: avança
             }
 
-            sendPhaseTwo(instance, ballot, request_record.getId());
             this.proposed_requests.add(request_record.getId());
+            if (fast) {
+                this.fast_marks.put(instance, request_record.getId());
+            }
+            sendPhaseTwo(instance, ballot, request_record.getId());
             this.next_instance_to_propose++;
+        }
+    }
+
+    /**
+     * Fast-Paxos: servidor que não é o líder entra num ballot rápido. Começa na primeira
+     * instância aberta pelo "any" e não volta a propor pedidos que outros já têm em votação.
+     */
+    private void enterFastBallot(int ballot) {
+        this.proposed_requests.clear();
+        this.fast_marks.clear();
+        this.next_instance_to_propose = this.server_state.getFastAnyFrom();
+        this.fast_proposer_ballot = ballot;
+        for (PaxosInstance entry : this.server_state.paxos_log.snapshotFrom(this.next_instance_to_propose)) {
+            if (entry.write_ballot == ballot && !entry.decided) {
+                noteVote(entry.instance_nb, ballot, entry.command_id);
+            }
+        }
+    }
+
+    /**
+     * Fast-Paxos: instâncias já decididas deixam de estar "em voo". Se foram decididas com
+     * outro valor, o pedido que propus (ou vi votar) aí perdeu e tem de poder ser proposto de novo.
+     */
+    private void settleFastMarks() {
+        for (Map.Entry<Integer, Integer> mark : this.fast_marks.entrySet()) {
+            PaxosInstance entry = this.server_state.paxos_log.getEntry(mark.getKey());
+            if (entry != null && entry.decided) {
+                this.fast_marks.remove(mark.getKey());
+                if (mark.getValue() != entry.decided_value) {
+                    this.proposed_requests.remove(mark.getValue());
+                }
+            }
+        }
+    }
+
+    /** Chamado pelo aceitador quando vota: o pedido já está a caminho, não o proponho de novo. */
+    void noteVote(int instance, int ballot, int value) {
+        if (value == NOOP || ballot != this.fast_proposer_ballot) {
+            return;
+        }
+        this.proposed_requests.add(value);
+        this.fast_marks.put(instance, value);
+    }
+
+    /** Fast-Paxos: o líder diz a todos os aceitadores/proponentes que as instâncias >= from estão abertas. */
+    private void sendAny(int ballot, int from) {
+        System.out.println("Fast-Paxos: a enviar \"any\" a partir da instância " + from + " (Ballot " + ballot + ")");
+        DidaTradePaxos.PhaseTwoRequest any_req = DidaTradePaxos.PhaseTwoRequest.newBuilder()
+                .setInstance(from).setRequestballot(ballot).setAny(true).build();
+        for (int target : this.server_state.scheduler.acceptors(ballot)) {
+            this.server_state.async_stubs[target].phasetwo(any_req, new StreamObserver<DidaTradePaxos.PhaseTwoReply>() {
+                @Override public void onNext(DidaTradePaxos.PhaseTwoReply reply) { }
+                @Override public void onError(Throwable t) { }
+                @Override public void onCompleted() { }
+            });
+        }
+    }
+
+    /**
+     * Fast-Paxos precisa de todos os aceitadores (quórum rápido 3 de 3). Se há propostas
+     * por decidir há demasiado tempo (aceitador em baixo, mensagens perdidas) passa-se ao
+     * ballot seguinte: é seguro, a Fase 1 desse ballot recupera o que possa ter sido escolhido.
+     */
+    private void checkFastStall() {
+        settleFastMarks();
+        int ballot = this.server_state.getCurrentBallot();
+        if (!this.server_state.scheduler.fastpaxos(ballot) || this.fast_proposer_ballot != ballot || this.fast_marks.isEmpty()) {
+            this.fast_stall_since = 0;
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (this.fast_stall_since == 0) {
+            this.fast_stall_since = now;
+        } else if (now - this.fast_stall_since > FAST_STALL_MS) {
+            System.out.println("Fast-Paxos: sem decisão há " + FAST_STALL_MS + "ms, a passar ao ballot " + (ballot + 1));
+            this.server_state.setCurrentBallot(ballot + 1);
+            this.fast_stall_since = 0;
+            wakeup();
         }
     }
 
@@ -135,22 +254,28 @@ public class MainLoop implements Runnable {
             return false;
         }
 
-        // Junta os logs recebidos: para cada posição fica o valor com o maior ballot
-        Map<Integer, Integer> merged_value  = new HashMap<Integer, Integer>();
-        Map<Integer, Integer> merged_ballot = new HashMap<Integer, Integer>();
+        // Junta os logs recebidos: para cada posição, os votos de cada aceitador que prometeu
+        Map<Integer, List<DidaTradePaxos.LogEntry>> votes_by_position = new HashMap<Integer, List<DidaTradePaxos.LogEntry>>();
+        int promises = 0;
         synchronized (phase_one_collector) {
             for (DidaTradePaxos.PhaseOneReply reply : phase_one_responses) {
                 if (!reply.getAccepted()) {
                     continue;
                 }
+                promises++;
                 for (DidaTradePaxos.LogEntry log_entry : reply.getLogList()) {
-                    Integer best = merged_ballot.get(log_entry.getPosition());
-                    if (best == null || log_entry.getBallot() > best) {
-                        merged_ballot.put(log_entry.getPosition(), log_entry.getBallot());
-                        merged_value.put(log_entry.getPosition(), log_entry.getCommandId());
+                    List<DidaTradePaxos.LogEntry> votes = votes_by_position.get(log_entry.getPosition());
+                    if (votes == null) {
+                        votes = new ArrayList<DidaTradePaxos.LogEntry>();
+                        votes_by_position.put(log_entry.getPosition(), votes);
                     }
+                    votes.add(log_entry);
                 }
             }
+        }
+        Map<Integer, Integer> merged_value = new HashMap<Integer, Integer>();
+        for (Map.Entry<Integer, List<DidaTradePaxos.LogEntry>> position : votes_by_position.entrySet()) {
+            merged_value.put(position.getKey(), chooseValue(position.getValue(), promises));
         }
 
         int last = from - 1;
@@ -165,7 +290,7 @@ public class MainLoop implements Runnable {
 
         for (int instance = from; instance <= last; instance++) {
             PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
-            Integer value = entry.decided ? Integer.valueOf(entry.command_id) : merged_value.get(instance);
+            Integer value = entry.decided ? Integer.valueOf(entry.decided_value) : merged_value.get(instance);
             if (value == null) {
                 value = NOOP;
             }
@@ -179,6 +304,41 @@ public class MainLoop implements Runnable {
         }
         this.next_instance_to_propose = last + 1;
         return true;
+    }
+
+    /**
+     * Valor a propor numa posição, dados os votos de um quórum de `promises` aceitadores.
+     * Só conta o ballot mais alto k. Num ballot clássico há um único valor. Num ballot rápido
+     * os aceitadores podem ter votado em valores diferentes: um valor v pode ter sido escolhido
+     * se algum quórum rápido R votou v, e então Q∩R (>= |Q|+|R|-n aceitadores de Q) votou v, por
+     * isso v é obrigatório. Se nenhum valor chega a esse mínimo, nada foi escolhido e qualquer
+     * dos votados serve (escolhe-se o mais votado).
+     */
+    private int chooseValue(List<DidaTradePaxos.LogEntry> votes, int promises) {
+        int k = -1;
+        for (DidaTradePaxos.LogEntry vote : votes) {
+            k = Math.max(k, vote.getBallot());
+        }
+        Map<Integer, Integer> count = new HashMap<Integer, Integer>();
+        for (DidaTradePaxos.LogEntry vote : votes) {
+            if (vote.getBallot() == k) {
+                count.merge(vote.getCommandId(), 1, Integer::sum);
+            }
+        }
+        int forced_at_least = promises + this.server_state.scheduler.fastquorum(k)
+                - this.server_state.scheduler.acceptors(k).size();
+        int best = NOOP;
+        int best_count = 0;
+        for (Map.Entry<Integer, Integer> candidate : count.entrySet()) {
+            if (this.server_state.scheduler.fastpaxos(k) && candidate.getValue() >= forced_at_least) {
+                return candidate.getKey();
+            }
+            if (candidate.getValue() > best_count || (candidate.getValue() == best_count && candidate.getKey() < best)) {
+                best = candidate.getKey();
+                best_count = candidate.getValue();
+            }
+        }
+        return best;
     }
 
     /**
@@ -261,21 +421,21 @@ public class MainLoop implements Runnable {
                 break; // Ainda não atingiu o quórum
             }
 
-            if (entry.command_id == NOOP || this.server_state.req_history.getIfProcessed(entry.command_id) != null) {
+            if (entry.decided_value == NOOP || this.server_state.req_history.getIfProcessed(entry.decided_value) != null) {
                 // No-op de preenchimento, ou pedido já executado noutra instância
-                System.out.println("Multi-Paxos: A saltar instância " + this.next_instance_to_execute + " (Command ID = " + entry.command_id + ")");
+                System.out.println("Multi-Paxos: A saltar instância " + this.next_instance_to_execute + " (Command ID = " + entry.decided_value + ")");
                 this.next_instance_to_execute++;
                 continue;
             }
 
-            RequestRecord request_record = this.server_state.req_history.getIfPending(entry.command_id);
+            RequestRecord request_record = this.server_state.req_history.getIfPending(entry.decided_value);
             if (request_record == null) {
                 // A instância está decidida na rede, mas o pedido gRPC do cliente ainda não
                 // chegou a esta réplica específica. Sai e espera que o wakeup() seja chamado.
                 break;
             }
 
-            System.out.println("Multi-Paxos: Executar instância decidida " + this.next_instance_to_execute + " (Command ID = " + entry.command_id + ")");
+            System.out.println("Multi-Paxos: Executar instância decidida " + this.next_instance_to_execute + " (Command ID = " + entry.decided_value + ")");
             DidaTradeCommand command = request_record.getRequest();
             boolean result = false;
             int balance = 0;
