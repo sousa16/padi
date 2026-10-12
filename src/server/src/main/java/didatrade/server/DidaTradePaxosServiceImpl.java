@@ -36,6 +36,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	int ballot            = request.getRequestballot();
 	boolean accepted      = false;
 	int  value, valballot, maxballot;
+	List<DidaTradePaxos.LogEntry> log = new ArrayList<DidaTradePaxos.LogEntry>();
 
 	synchronized (acceptor_lock) {
 	    PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance, ballot);
@@ -49,6 +50,32 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	    }
 
 	    maxballot = this.server_state.getCurrentBallot();
+
+	    // Multi-Paxos: the promise covers every instance from `instance` onwards,
+	    // so send back everything this acceptor has accepted (or knows to be
+	    // decided) from there. The new leader must re-propose these values.
+	    // Read under acceptor_lock, the same lock phasetwo uses to write
+	    // write_ballot/command_id -- otherwise this loop can read a stale,
+	    // pre-vote value for an instance another thread just voted on.
+	    if (accepted) {
+		for (PaxosInstance log_entry : this.server_state.paxos_log.snapshotFrom(instance)) {
+		    if (log_entry.write_ballot < 0 && !log_entry.decided)
+			continue;
+		    DidaTradePaxos.LogEntry.Builder log_entry_builder = DidaTradePaxos.LogEntry.newBuilder();
+		    log_entry_builder.setPosition(log_entry.instance_nb);
+		    // A decided value is final. Otherwise report this acceptor's own vote
+		    // (value + the ballot it was cast in), never what it merely learned.
+		    if (log_entry.decided) {
+			log_entry_builder.setBallot(log_entry.accept_ballot);
+			log_entry_builder.setCommandId(log_entry.decided_value);
+		    }
+		    else {
+			log_entry_builder.setBallot(log_entry.write_ballot);
+			log_entry_builder.setCommandId(log_entry.command_id);
+		    }
+		    log.add(log_entry_builder.build());
+		}
+	    }
 	}
 
 	DidaTradePaxos.PhaseOneReply.Builder response_builder = DidaTradePaxos.PhaseOneReply.newBuilder();
@@ -59,29 +86,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	response_builder.setValue(value);
 	response_builder.setValballot(valballot);
 	response_builder.setMaxballot(maxballot);
-
-	// Multi-Paxos: the promise covers every instance from `instance` onwards,
-	// so send back everything this acceptor has accepted (or knows to be
-	// decided) from there. The new leader must re-propose these values.
-	if (accepted) {
-	    for (PaxosInstance log_entry : this.server_state.paxos_log.snapshotFrom(instance)) {
-		if (log_entry.write_ballot < 0 && !log_entry.decided)
-		    continue;
-		DidaTradePaxos.LogEntry.Builder log_entry_builder = DidaTradePaxos.LogEntry.newBuilder();
-		log_entry_builder.setPosition(log_entry.instance_nb);
-		// A decided value is final. Otherwise report this acceptor's own vote
-		// (value + the ballot it was cast in), never what it merely learned.
-		if (log_entry.decided) {
-		    log_entry_builder.setBallot(log_entry.accept_ballot);
-		    log_entry_builder.setCommandId(log_entry.decided_value);
-		}
-		else {
-		    log_entry_builder.setBallot(log_entry.write_ballot);
-		    log_entry_builder.setCommandId(log_entry.command_id);
-		}
-		response_builder.addLog(log_entry_builder.build());
-	    }
-	}
+	response_builder.addAllLog(log);
 
 	DidaTradePaxos.PhaseOneReply response = response_builder.build();
 
