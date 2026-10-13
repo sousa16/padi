@@ -120,7 +120,13 @@ Checkpoint is 30 Sep, final is 16 Oct.
       per-value vote tallying, collision detection, and the automatic
       reconfiguration from spec §4.4 (any replica bumps ballot on a stuck/
       collided fast round, no console needed).
-- [ ] Step 4 — `balance` outside Paxos, causally ordered. Needs vector clocks.
+- [x] Step 4 — `balance` outside Paxos, causally ordered. Every write goes
+      through one totally ordered log, so the client's causal history is a
+      single number: how many log slots it has seen (`seen_slot`, a vector
+      clock with one entry). Each write reply carries the slot it executed at;
+      `balance` sends `min_slot`, and a replica answers it locally, without
+      consensus, only once it has executed that far. A lagging replica waits
+      ("balance … waiting for slot N (at M)") rather than answering stale.
 - [ ] Step 5 — dynamic membership and state transfer, Schedule B (spec §6).
       Schedule C is wired up too: 7 replicas, and the acceptor set really does
       change ({0,1,2,3,4} → {2,3,4,5,6} at Config3), so it is the harder case to
