@@ -46,6 +46,10 @@ public class DidaTradeServerState {
 
     private int                 current_ballot;
     private int                 completed_ballot;
+
+    /* Log slots executed so far, i.e. the next instance to execute. A causal
+     * balance read waits until this reaches what the client has already seen. */
+    private int                 executed_slots = 0;
     private int                 debug_mode;
     private boolean             slow_mode;
     private Random              debug_rnd;
@@ -150,6 +154,25 @@ public class DidaTradeServerState {
     }
 
     
+    public synchronized void setExecutedSlots (int n) {
+	this.executed_slots = n;
+	this.notifyAll();
+    }
+
+    public synchronized int getExecutedSlots () {
+	return this.executed_slots;
+    }
+
+    public synchronized void waitForExecutedSlots (int n) {
+	while (this.executed_slots < n) {
+	    try {
+		wait ();
+	    }
+	    catch (InterruptedException e) {
+	    }
+	}
+    }
+
     public synchronized int waitForCompletedBallot(int ballot) {
         while (this.completed_ballot < ballot) {
             try {

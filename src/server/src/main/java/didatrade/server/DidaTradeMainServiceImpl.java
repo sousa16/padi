@@ -40,7 +40,7 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 	// for debug purposes
 	System.out.println("Result is ready for open request with reqid " + reqid);
 	
-	DidaTradeMain.PopulateReply response = DidaTradeMain.PopulateReply.newBuilder().setReqid(reqid).setResult(result).build();
+	DidaTradeMain.PopulateReply response = DidaTradeMain.PopulateReply.newBuilder().setReqid(reqid).setResult(result).setSlot(request_record.getSlot()).build();
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
     }
@@ -73,7 +73,7 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 	// for debug purposes
 	System.out.println("Result is ready for add request with reqid " + reqid);
 	
-	DidaTradeMain.AddUserReply response =DidaTradeMain.AddUserReply.newBuilder().setReqid(reqid).setResult(result).build();
+	DidaTradeMain.AddUserReply response =DidaTradeMain.AddUserReply.newBuilder().setReqid(reqid).setResult(result).setSlot(request_record.getSlot()).build();
 	
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
@@ -105,7 +105,7 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 	// for debug purposes
 	System.out.println("Result is ready for add request with reqid " + reqid);
 	
-	DidaTradeMain.BuyReply response =DidaTradeMain.BuyReply.newBuilder().setReqid(reqid).setResult(result).build();
+	DidaTradeMain.BuyReply response =DidaTradeMain.BuyReply.newBuilder().setReqid(reqid).setResult(result).setSlot(request_record.getSlot()).build();
 	
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
@@ -138,41 +138,43 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 	// for debug purposes
 	System.out.println("Result is ready for add request with reqid " + reqid);
 	
-	DidaTradeMain.SellReply response =DidaTradeMain.SellReply.newBuilder().setReqid(reqid).setResult(result).build();
+	DidaTradeMain.SellReply response =DidaTradeMain.SellReply.newBuilder().setReqid(reqid).setResult(result).setSlot(request_record.getSlot()).build();
 	
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
     }
 
+    /**
+     * Step 4: balance does not go through Paxos. It is answered locally, as soon
+     * as this replica has executed at least the log slots the client has already
+     * seen (min_slot), so it reflects every write the client observed. The reply
+     * carries the slots reflected, which the client folds into what it has seen.
+     */
     @Override
     public void balance(DidaTradeMain.BalanceRequest request, StreamObserver<DidaTradeMain.BalanceReply> responseObserver) {
 	this.server_state.debugGate();
 
-	// for debug purposes
-	System.out.println("Receiving balance request:" + request);
-
 	int reqid    = request.getReqid();
 	int uid      = request.getUserid();
+	int min_slot = request.getMinSlot();
 
-	// for debug purposes
-	System.out.println("reqid " + reqid + " userid " + uid);
+	int executed = this.server_state.getExecutedSlots();
+	if (executed < min_slot) {
+	    System.out.println("balance reqid " + reqid + " waiting for slot " + min_slot + " (at " + executed + ")");
+	    this.server_state.waitForExecutedSlots(min_slot);
+	}
 
-	DidaTradeCommand command = new DidaTradeCommand (DidaTradeAction.BALANCE, uid);
+	// same lock MainLoop holds while executing a slot, so balance and slot match
+	int balance, slot;
+	synchronized (this.server_state.trade_manager) {
+	    balance = this.server_state.trade_manager.balance(uid);
+	    slot    = this.server_state.getExecutedSlots();
+	}
 
-	// for debug purposes
-	System.out.println("Adding balance request with reqid " + reqid + " to pending");
+	System.out.println("balance reqid " + reqid + " user " + uid + " = " + balance + " (at slot " + slot + ")");
 
-	RequestRecord request_record = new RequestRecord (reqid, command);
-	this.server_state.req_history.addToPending (reqid, request_record);
-	this.server_state.main_loop.wakeup ();
-	boolean result = request_record.waitForResponse();
+	DidaTradeMain.BalanceReply response = DidaTradeMain.BalanceReply.newBuilder().setReqid(reqid).setResult(balance != -1).setBalance(balance).setSlot(slot).build();
 
-	// for debug purposes
-	System.out.println("Result is ready for add request with reqid " + reqid);
-
-	int balance = command.getQuantity();
-	DidaTradeMain.BalanceReply response =DidaTradeMain.BalanceReply.newBuilder().setReqid(reqid).setResult(result).setBalance(balance).build();
-	
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
     }
@@ -202,7 +204,7 @@ public class DidaTradeMainServiceImpl extends DidaTradeMainServiceGrpc.DidaTrade
 	// for debug purposes
 	System.out.println("Result is ready for dump request with reqid " + reqid);
 	
-	DidaTradeMain.DumpReply response =DidaTradeMain.DumpReply.newBuilder().setReqid(reqid).setResult(result).build();
+	DidaTradeMain.DumpReply response =DidaTradeMain.DumpReply.newBuilder().setReqid(reqid).setResult(result).setSlot(request_record.getSlot()).build();
 	
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();

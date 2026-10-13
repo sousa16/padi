@@ -111,12 +111,22 @@ No compose service sets a restart policy, so a crashed replica stays down until
 Going for Premium: steps 1 and 2 by the checkpoint, 3 and 4 by the final.
 Checkpoint is 30 Sep, final is 16 Oct.
 
-- [ ] Step 1 — debug modes (crash, freeze, un-freeze, slow-mode) and a real Paxos
-      phase 1. The baseline fakes it; start at `PhaseOneBogusProcessor`.
-- [ ] Step 2 — Multi-Paxos, still on Schedule A.
-- [ ] Step 3 — Fast-Paxos. New on the syllabus this year, so the paper is the only
-      real source.
-- [ ] Step 4 — `balance` outside Paxos, causally ordered. Needs vector clocks.
+- [x] Step 1 — debug modes (crash, freeze, un-freeze, slow-mode) and a real Paxos
+      phase 1. The baseline fakes it; started at `PhaseOneBogusProcessor`, replaced
+      by `PhaseOneProcessor`.
+- [x] Step 2 — Multi-Paxos, still on Schedule A. One phase 1 per leadership
+      change, pipelined phase 2 across instances, strict in-order execution.
+- [x] Step 3 — Fast-Paxos. Any-message proposing after the leader's phase 1,
+      per-value vote tallying, collision detection, and the automatic
+      reconfiguration from spec §4.4 (any replica bumps ballot on a stuck/
+      collided fast round, no console needed).
+- [x] Step 4 — `balance` outside Paxos, causally ordered. Every write goes
+      through one totally ordered log, so the client's causal history is a
+      single number: how many log slots it has seen (`seen_slot`, a vector
+      clock with one entry). Each write reply carries the slot it executed at;
+      `balance` sends `min_slot`, and a replica answers it locally, without
+      consensus, only once it has executed that far. A lagging replica waits
+      ("balance … waiting for slot N (at M)") rather than answering stale.
 - [ ] Step 5 — dynamic membership and state transfer, Schedule B (spec §6).
       Schedule C is wired up too: 7 replicas, and the acceptor set really does
       change ({0,1,2,3,4} → {2,3,4,5,6} at Config3), so it is the harder case to

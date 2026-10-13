@@ -6,6 +6,7 @@ public class RequestRecord {
     private DidaTradeCommand request;
     private boolean response_available;
     private boolean response_value;
+    private int slot;   // log slots executed when this request ran
     
     public RequestRecord(int id) {
 	this.requestid = id;
@@ -36,6 +37,14 @@ public class RequestRecord {
 
     public boolean getResponseValue() {
         return this.response_value;
+    }
+
+    public void setSlot(int slot) {
+        this.slot = slot;
+    }
+
+    public int getSlot() {
+        return this.slot;
     }
 
     public synchronized void setResponse(boolean resp) {

@@ -478,6 +478,7 @@ public class MainLoop implements Runnable {
                 // No-op de preenchimento, ou pedido já executado noutra instância
                 System.out.println("Multi-Paxos: A saltar instância " + this.next_instance_to_execute + " (Command ID = " + entry.decided_value + ")");
                 this.next_instance_to_execute++;
+                this.server_state.setExecutedSlots(this.next_instance_to_execute);
                 continue;
             }
 
@@ -491,30 +492,32 @@ public class MainLoop implements Runnable {
             System.out.println("Multi-Paxos: Executar instância decidida " + this.next_instance_to_execute + " (Command ID = " + entry.decided_value + ")");
             DidaTradeCommand command = request_record.getRequest();
             boolean result = false;
-            int balance = 0;
             DidaTradeAction action = command.getAction();
+            int slot = this.next_instance_to_execute + 1;
 
-            switch (action) {
-                case POPULATE: result = this.server_state.trade_manager.populate(command.getQuantity()); break;
-                case ADDUSER: result = this.server_state.trade_manager.add_user(command.getUserId(), command.getQuantity(), command.getStock()); break;
-                case SELL: result = this.server_state.trade_manager.sell(command.getUserId(), command.getQuantity()); break;
-                case BUY: result = this.server_state.trade_manager.acquire(command.getUserId(), command.getQuantity()); break;
-                case BALANCE:
-                    balance = this.server_state.trade_manager.balance(command.getUserId());
-                    command.setQuantity(balance);
-                    result = (balance != -1);
-                    break;
-                case DUMP:
-                    this.server_state.trade_manager.dump();
-                    result = true;
-                    break;
-                default:
-                    result = false;
-                    System.err.println("*** Unknown command ****");
-                    break;
+            // Step 4: o estado e o contador de slots mudam juntos, debaixo do mesmo lock que
+            // o balance causal usa para os ler. Assim um balance nunca vê o estado depois deste
+            // comando com um contador de antes (o cliente podia depois ler um estado mais antigo).
+            synchronized (this.server_state.trade_manager) {
+                switch (action) {
+                    case POPULATE: result = this.server_state.trade_manager.populate(command.getQuantity()); break;
+                    case ADDUSER: result = this.server_state.trade_manager.add_user(command.getUserId(), command.getQuantity(), command.getStock()); break;
+                    case SELL: result = this.server_state.trade_manager.sell(command.getUserId(), command.getQuantity()); break;
+                    case BUY: result = this.server_state.trade_manager.acquire(command.getUserId(), command.getQuantity()); break;
+                    case DUMP:
+                        this.server_state.trade_manager.dump();
+                        result = true;
+                        break;
+                    default:
+                        result = false;
+                        System.err.println("*** Unknown command ****");
+                        break;
+                }
+                this.server_state.setExecutedSlots(slot);
             }
 
             // Fecha a transação
+            request_record.setSlot(slot);
             request_record.setResponse(result);
             this.server_state.req_history.moveToProcessed(request_record.getId());
             this.proposed_requests.remove(request_record.getId());

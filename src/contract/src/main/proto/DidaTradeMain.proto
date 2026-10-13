@@ -12,6 +12,7 @@ message PopulateRequest {
 message PopulateReply {
   int32 reqid   = 1;
   bool  result	= 2;
+  int32 slot    = 3;   // log slots executed at this replica when it answered
 }
 
 message AddUserRequest {
@@ -24,6 +25,7 @@ message AddUserRequest {
 message AddUserReply {
   int32 reqid   = 1;
   bool  result	= 2;
+  int32 slot    = 3;   // log slots executed at this replica when it answered
 }
 
 message SellRequest {
@@ -35,6 +37,7 @@ message SellRequest {
 message SellReply {
   int32 reqid   = 1;
   bool  result	= 2;
+  int32 slot    = 3;   // log slots executed at this replica when it answered
 }
 
 message BuyRequest {
@@ -46,17 +49,20 @@ message BuyRequest {
 message BuyReply {
   int32 reqid   = 1;
   bool  result	= 2;
+  int32 slot    = 3;   // log slots executed at this replica when it answered
 }
 
 message BalanceRequest {
   int32 reqid    = 1;
   int32 userid   = 2;
+  int32 min_slot = 3;   // client has seen this many log slots: answer only once caught up
 }
 
 message BalanceReply {
   int32 reqid   = 1;
   bool  result	= 2;
   int32 balance = 3;
+  int32 slot    = 4;
 }
 
 message DumpRequest {
@@ -66,6 +72,7 @@ message DumpRequest {
 message DumpReply {
   int32 reqid   = 1;
   bool  result	= 2;
+  int32 slot    = 3;   // log slots executed at this replica when it answered
 }
 
 service DidaTradeMainService {

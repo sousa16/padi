@@ -1,6 +1,6 @@
 package didatrade.server;
 
-enum DidaTradeAction {POPULATE, ADDUSER, BUY, SELL, BALANCE, DUMP};
+enum DidaTradeAction {POPULATE, ADDUSER, BUY, SELL, DUMP};   // BALANCE is answered outside Paxos (Step 4)
 
 public class DidaTradeCommand {
     private DidaTradeAction  action;
