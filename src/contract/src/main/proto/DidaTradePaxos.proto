@@ -37,6 +37,8 @@ message PhaseTwoRequest {
   int32 requestballot   = 2;
   int32 value           = 3;
   bool  any             = 4;
+  // In a fast ballot, the acceptor assigns the request to its lowest open slot.
+  bool  allocate        = 5;
 }
 
 message PhaseTwoReply {
@@ -67,7 +69,6 @@ service DidaTradePaxosService {
   rpc phasetwo (PhaseTwoRequest) returns (PhaseTwoReply);
   rpc learn    (LearnRequest)    returns (LearnReply);
 }
-
 
 
 

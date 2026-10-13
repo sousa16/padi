@@ -66,7 +66,7 @@ public class ConfigurationScheduler {
 	return s.fastpaxos(ballot);
     }
 
-    /* Fast Paxos quorum: ceil(3n/4) of the ballot's acceptors (3 of 3 in schedule A). */
+    /* Fast Paxos quorum: ceil(3n/4) of the ballot's acceptors (3 of 3 or 4 of 5). */
     public Integer fastquorum(int ballot) {
 	int n = s.acceptors(ballot).size();
 	return (3 * n + 3) / 4;

@@ -106,6 +106,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	boolean accepted      = false;
 	int  maxballot        = ballot;
 	boolean is_any        = request.getAny();
+	boolean allocate      = request.getAllocate();
 
 	synchronized (acceptor_lock) {
 	    if (ballot < this.server_state.getCurrentBallot()) {
@@ -118,31 +119,47 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		this.server_state.openFastBallot(ballot, instance);
 	    }
 	    else {
-		PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
-		if (this.server_state.scheduler.fastpaxos(ballot) && entry.write_ballot == ballot && entry.command_id != value) {
-		    // fast ballot: the first value voted for in an instance is the only one, a different proposal is a collision
-		    maxballot = this.server_state.getCurrentBallot();
+		if (allocate) {
+		    if (!this.server_state.scheduler.fastpaxos(ballot)
+			    || this.server_state.getFastAnyBallot() != ballot) {
+			maxballot = this.server_state.getCurrentBallot();
+			instance = -1;
+		    }
+		    else {
+			instance = lowestOpenFastInstance(ballot, value);
+		    }
 		}
-		else {
-		    accepted           = true;
-		    entry.command_id   = value;
-		    entry.write_ballot = ballot;
-		    this.server_state.setCurrentBallot(ballot);
+		if (allocate && instance < 0) {
+		    maxballot = this.server_state.getCurrentBallot();
+		} else {
+		    PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
+		    if (this.server_state.scheduler.fastpaxos(ballot) && entry.write_ballot == ballot && entry.command_id != value) {
+			// fast ballot: the first value voted for in an instance is the only one, a different proposal is a collision
+			maxballot = this.server_state.getCurrentBallot();
+		    } else {
+			accepted = true;
+			if (entry.write_ballot != ballot) {
+			    entry.command_id   = value;
+			    entry.write_ballot = ballot;
+			}
+			this.server_state.setCurrentBallot(ballot);
+		    }
 		}
 	    }
 	}
 
+	final int accepted_instance = instance;
 	if (is_any) {
 	    if (accepted)
 		this.server_state.main_loop.wakeup();
 	}
 	else if (accepted) {
-	    this.server_state.main_loop.noteVote(instance, ballot, value);
+	    this.server_state.main_loop.noteVote(accepted_instance, ballot, value);
 	}
 
 	DidaTradePaxos.PhaseTwoReply.Builder response_builder = DidaTradePaxos.PhaseTwoReply.newBuilder();
 	response_builder.setAccepted(accepted);
-	response_builder.setInstance(instance);
+	response_builder.setInstance(accepted_instance);
 	response_builder.setServerid(this.server_state.my_id);
 	response_builder.setRequestballot(ballot);
 	response_builder.setMaxballot(maxballot);
@@ -161,14 +178,14 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    int n_targets          = learners.size();
 		    
 		    DidaTradePaxos.LearnRequest.Builder learn_request_builder = DidaTradePaxos.LearnRequest.newBuilder();
-		    learn_request_builder.setInstance(instance);
+		    learn_request_builder.setInstance(accepted_instance);
 		    learn_request_builder.setValue(value);
 		    learn_request_builder.setBallot(ballot);
 		    learn_request_builder.setServerid(this.server_state.my_id);
 		    
 		    DidaTradePaxos.LearnRequest learn_request = learn_request_builder.build();
 		    
-		    System.out.println("Paxos acceptor: going to notify learners for entry " + instance + " with timestamp " + ballot + " request = " + learn_request);
+		    System.out.println("Paxos acceptor: going to notify learners for entry " + accepted_instance + " with timestamp " + ballot + " request = " + learn_request);
 		    ArrayList<DidaTradePaxos.LearnReply> learn_responses = new ArrayList<DidaTradePaxos.LearnReply>();
 		    GenericResponseCollector<DidaTradePaxos.LearnReply> learn_collector = new GenericResponseCollector<DidaTradePaxos.LearnReply>(learn_responses, n_targets);;
 		    for (int i = 0; i < n_targets; i++) {
@@ -177,8 +194,23 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    }
 		});
 	}
-	
-	
+    }
+
+    /* Fast proposals have no slot until each acceptor places them. Repeated
+     * deliveries of the same request reuse its slot rather than consuming one. */
+    private int lowestOpenFastInstance(int ballot, int value) {
+	int instance = this.server_state.getFastAnyFrom();
+	while (instance >= 0) {
+	    PaxosInstance entry = this.server_state.paxos_log.getEntry(instance);
+	    if (entry == null || (!entry.decided && entry.write_ballot < 0))
+		return instance;
+	    if (!entry.decided && entry.write_ballot == ballot && entry.command_id == value)
+		return instance;
+	    if (instance == Integer.MAX_VALUE)
+		break;
+	    instance++;
+	}
+	return -1;
     }
 
     @Override
