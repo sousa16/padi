@@ -11,11 +11,13 @@ message PhaseOneRequest {
   int32 requestballot	= 2;
 }
 
-// One accepted (or decided) value in an acceptor's log.
+// One accepted (or decided) value in an acceptor's log. A decided value is
+// final, whatever its ballot, so the new leader must keep it.
 message LogEntry {
   int32 position     = 1;
   int32 ballot       = 2;
   int32 command_id   = 3;
+  bool  decided      = 4;
 }
 
 message PhaseOneReply {
@@ -64,10 +66,53 @@ message LearnReply {
   int32 ballot     = 2;
 }
 
+// Step 5, state transfer. A decided log position together with the command
+// itself: a replica that missed the client request (or restarted and lost it)
+// cannot execute a bare command id. command_id -1 is a no-op, with no body.
+message DecidedCommand {
+  int32 position     = 1;
+  int32 ballot       = 2;
+  int32 command_id   = 3;
+  int32 action       = 4;
+  int32 userid       = 5;
+  int32 quantity     = 6;
+  int32 stock        = 7;
+}
+
+// Pull: a replica that is behind (or just restarted) asks a peer for every
+// decided position from `from_instance` onwards.
+message FetchStateRequest {
+  int32 from_instance = 1;
+  int32 serverid      = 2;
+}
+
+message FetchStateReply {
+  int32 serverid      = 1;
+  int32 ballot        = 2;   // the peer's current ballot
+  int32 executed      = 3;   // log positions the peer has executed
+  bool  has_votes     = 4;   // the peer has voted at least once as an acceptor
+  repeated DecidedCommand commands = 5;
+}
+
+// Push: the leader of a ballot whose acceptor set changed hands the decided
+// log to the new acceptors before declaring the ballot complete.
+message InstallStateRequest {
+  int32 ballot        = 1;
+  int32 serverid      = 2;
+  repeated DecidedCommand commands = 3;
+}
+
+message InstallStateReply {
+  int32 serverid      = 1;
+  bool  ack           = 2;
+}
+
 service DidaTradePaxosService {
   rpc phaseone (PhaseOneRequest) returns (PhaseOneReply);
   rpc phasetwo (PhaseTwoRequest) returns (PhaseTwoReply);
   rpc learn    (LearnRequest)    returns (LearnReply);
+  rpc fetchstate   (FetchStateRequest)   returns (FetchStateReply);
+  rpc installstate (InstallStateRequest) returns (InstallStateReply);
 }
 
 

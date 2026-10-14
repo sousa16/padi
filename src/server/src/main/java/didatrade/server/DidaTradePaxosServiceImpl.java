@@ -14,6 +14,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.stub.StreamObserver;
 import io.grpc.Context;
+import io.grpc.Status;
 
 public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTradePaxosServiceImplBase {
     DidaTradeServerState server_state;
@@ -37,6 +38,11 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	boolean accepted      = false;
 	int  value, valballot, maxballot;
 	List<DidaTradePaxos.LogEntry> log = new ArrayList<DidaTradePaxos.LogEntry>();
+
+	if (!this.server_state.mayParticipate(ballot)) {
+	    abstain(responseObserver, ballot);
+	    return;
+	}
 
 	synchronized (acceptor_lock) {
 	    PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance, ballot);
@@ -68,6 +74,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    if (log_entry.decided) {
 			log_entry_builder.setBallot(log_entry.accept_ballot);
 			log_entry_builder.setCommandId(log_entry.decided_value);
+			log_entry_builder.setDecided(true);
 		    }
 		    else {
 			log_entry_builder.setBallot(log_entry.write_ballot);
@@ -107,6 +114,11 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	int  maxballot        = ballot;
 	boolean is_any        = request.getAny();
 	boolean allocate      = request.getAllocate();
+
+	if (!this.server_state.mayParticipate(ballot)) {
+	    abstain(responseObserver, ballot);
+	    return;
+	}
 
 	synchronized (acceptor_lock) {
 	    if (ballot < this.server_state.getCurrentBallot()) {
@@ -196,13 +208,24 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	}
     }
 
+    /* A recovered replica sitting out a ballot it may have voted in before
+     * crashing. Answering with an error (rather than a refusal) makes the
+     * proposer count it as unreachable: the other acceptors can still form a
+     * quorum, whereas a refusal would abort the whole phase 1. */
+    private <T> void abstain(StreamObserver<T> responseObserver, int ballot) {
+	System.out.println("Recovered acceptor: abstaining from ballot " + ballot);
+	responseObserver.onError(Status.UNAVAILABLE.withDescription("recovered acceptor abstains from ballot " + ballot).asRuntimeException());
+    }
+
     /* Fast proposals have no slot until each acceptor places them. Repeated
-     * deliveries of the same request reuse its slot rather than consuming one. */
+     * deliveries of the same request reuse its slot rather than consuming one.
+     * A vote from an older ballot does not hold a slot: the leader's "any"
+     * only opens positions where its phase 1 found nothing could be chosen. */
     private int lowestOpenFastInstance(int ballot, int value) {
 	int instance = this.server_state.getFastAnyFrom();
 	while (instance >= 0) {
 	    PaxosInstance entry = this.server_state.paxos_log.getEntry(instance);
-	    if (entry == null || (!entry.decided && entry.write_ballot < 0))
+	    if (entry == null || (!entry.decided && entry.write_ballot < ballot))
 		return instance;
 	    if (!entry.decided && entry.write_ballot == ballot && entry.command_id == value)
 		return instance;
@@ -224,7 +247,8 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	int value            = request.getValue();
 	int acceptor         = request.getServerid();
 
-	synchronized (this) {
+	// same lock as a state transfer installing decided positions
+	synchronized (this.server_state.paxos_log) {
 	    PaxosInstance entry  = this.server_state.paxos_log.testAndSetEntry(instance);
 
 	    this.server_state.setCurrentBallot(ballot);
@@ -249,7 +273,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    System.out.println("Paxos learner: instance " + instance + " decided (Command ID = " + value + ")");
 		    entry.decided_value = value;
 		    entry.decided       = true;
-		    this.server_state.updateCompletedBallot(ballot);
+		    this.server_state.noteDecided(instance);
 		    this.server_state.main_loop.wakeup ();
 		}
 		else if (collided(entry, ballot)) {
@@ -271,6 +295,51 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	
 	// System.out.println("Sending learn response");
 		
+	responseObserver.onNext(response);
+	responseObserver.onCompleted();
+    }
+
+    /* Step 5, pull side of the state transfer: hand a lagging or restarted
+     * peer every decided position it asks for, with the commands. Answered
+     * even while recovering ourselves: it is read-only. */
+    @Override
+    public void fetchstate(DidaTradePaxos.FetchStateRequest request, StreamObserver<DidaTradePaxos.FetchStateReply> responseObserver) {
+	this.server_state.debugGate();
+
+	// The peer is (back) up. While it was down our channel to it went into
+	// gRPC's exponential reconnect back-off (up to 2 minutes), and until that
+	// expires every call to it fails at once: it could not vote or learn.
+	int peer = request.getServerid();
+	if (peer >= 0 && peer < this.server_state.channels.length)
+	    this.server_state.channels[peer].resetConnectBackoff();
+
+	List<DidaTradePaxos.DecidedCommand> commands = this.server_state.decidedCommandsFrom(request.getFromInstance());
+	System.out.println("State transfer: sending " + commands.size() + " decided positions from " + request.getFromInstance() + " to replica " + request.getServerid());
+
+	DidaTradePaxos.FetchStateReply response = DidaTradePaxos.FetchStateReply.newBuilder()
+	    .setServerid(this.server_state.my_id)
+	    .setBallot(this.server_state.getCurrentBallot())
+	    .setExecuted(this.server_state.getExecutedSlots())
+	    .setHasVotes(this.server_state.hasVotes())
+	    .addAllCommands(commands)
+	    .build();
+	responseObserver.onNext(response);
+	responseObserver.onCompleted();
+    }
+
+    /* Step 5, push side: the leader of a ballot with a new acceptor set gives
+     * those acceptors the decided log before calling the ballot complete. */
+    @Override
+    public void installstate(DidaTradePaxos.InstallStateRequest request, StreamObserver<DidaTradePaxos.InstallStateReply> responseObserver) {
+	this.server_state.debugGate();
+
+	System.out.println("State transfer: leader " + request.getServerid() + " of ballot " + request.getBallot() + " pushed " + request.getCommandsCount() + " decided positions");
+	this.server_state.installDecided(request.getCommandsList());
+
+	DidaTradePaxos.InstallStateReply response = DidaTradePaxos.InstallStateReply.newBuilder()
+	    .setServerid(this.server_state.my_id)
+	    .setAck(true)
+	    .build();
 	responseObserver.onNext(response);
 	responseObserver.onCompleted();
     }

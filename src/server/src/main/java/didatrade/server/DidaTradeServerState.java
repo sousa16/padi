@@ -58,7 +58,16 @@ public class DidaTradeServerState {
     /* Latest "any" from a fast ballot's leader: instances >= fast_any_from are open to every proposer. */
     private int                 fast_any_ballot = -1;
     private int                 fast_any_from   = 0;
- 
+
+    /* Step 5, recovery. A replica that comes back has lost its promises and
+     * votes, so until it has asked its peers where the system is it neither
+     * promises nor votes (recovering), and afterwards it abstains from every
+     * ballot up to the highest one its peers reported (abstain_upto): it may
+     * have voted in those before the crash, and could now contradict itself. */
+    private boolean             recovering    = true;
+    private int                 abstain_upto  = -1;
+    private int                 max_decided   = -1;
+
     MainLoop                    main_loop;
     Thread                      main_loop_worker;
     
@@ -118,35 +127,13 @@ public class DidaTradeServerState {
 	return this.completed_ballot;
     }
 
-    public int findMaxDecidedBallot () {
-	int ballot = -1;
-	int length = this.paxos_log.length();
-
-	for (int i=0; i< length; i++) {
-	    PaxosInstance entry = this.paxos_log.getEntry(i);
-	    if (entry == null)
-		return ballot;
-	    if (!entry.decided)
-		return ballot;
-	    else if (entry.accept_ballot > ballot)
-		ballot = entry.accept_ballot;
-
-	}
-	return ballot;
-    }
-    
-    public synchronized void updateCompletedBallot (int ballot) {
-	// WARNING: THIS ONLY WORKS FOR CONFIGURATIONS WHERE THERE IS NO NEED FOR STATE-TRANSFER!!!!!
-	// NEEDS TO BE UPDATE FOR THE PROJECT
-
-
-	ballot = this.findMaxDecidedBallot ();
-	if (ballot > this.completed_ballot)
-	    this.completed_ballot = ballot;
-	this.notifyAll();
-    }
-
-    
+    /* Step 5 (Vertical Paxos): a ballot b is complete once its leader finished
+     * phase 1, every value it recovered is accepted by a quorum of b's
+     * acceptors, and, if the acceptor set changed, those acceptors also hold
+     * the decided log (state transfer). Later leaders then only query
+     * acceptors from b on. Only the leader of b (MainLoop.CompletionTracker)
+     * or the console, relaying it, may raise this: a value set too high
+     * makes a later phase 1 skip acceptors that may hold a chosen value. */
     public synchronized void setCompletedBallot (int ballot) {
 	if (ballot > this.completed_ballot)
 	    this.completed_ballot = ballot;
@@ -197,6 +184,102 @@ public class DidaTradeServerState {
 
     public synchronized int getFastAnyFrom () {
 	return this.fast_any_from;
+    }
+
+    public synchronized void finishRecovery (int abstain_upto) {
+	this.abstain_upto = abstain_upto;
+	this.recovering   = false;
+	this.notifyAll();
+    }
+
+    /* Acceptor side: blocks while recovering, then tells whether this replica
+     * may take part (promise or vote) in `ballot`. */
+    public synchronized boolean mayParticipate (int ballot) {
+	while (this.recovering) {
+	    try {
+		wait ();
+	    }
+	    catch (InterruptedException e) {
+		Thread.currentThread().interrupt();
+		return false;
+	    }
+	}
+	return ballot > this.abstain_upto;
+    }
+
+    public synchronized void noteDecided (int instance) {
+	if (instance > this.max_decided)
+	    this.max_decided = instance;
+    }
+
+    public synchronized int getMaxDecided () {
+	return this.max_decided;
+    }
+
+    /* State transfer, sending side: every position from `from` on that is
+     * decided here and whose command body this replica has. */
+    public List<DidaTradePaxos.DecidedCommand> decidedCommandsFrom (int from) {
+	List<DidaTradePaxos.DecidedCommand> commands = new ArrayList<DidaTradePaxos.DecidedCommand>();
+	for (PaxosInstance entry : this.paxos_log.snapshotFrom(from)) {
+	    if (!entry.decided)
+		continue;
+	    DidaTradePaxos.DecidedCommand.Builder builder = DidaTradePaxos.DecidedCommand.newBuilder();
+	    builder.setPosition(entry.instance_nb).setBallot(entry.accept_ballot).setCommandId(entry.decided_value);
+	    if (entry.decided_value != MainLoop.NOOP) {
+		RequestRecord record = this.req_history.getIfExists(entry.decided_value);
+		if (record == null || record.getRequest() == null)
+		    continue;   // decided, but the client's request never reached us
+		DidaTradeCommand command = record.getRequest();
+		builder.setAction(command.getAction().ordinal())
+		    .setUserid(command.getUserId())
+		    .setQuantity(command.getQuantity())
+		    .setStock(command.getStock());
+	    }
+	    commands.add(builder.build());
+	}
+	return commands;
+    }
+
+    /* State transfer, receiving side: record each position as decided and
+     * keep its command, so MainLoop can execute it like any other. Uses the
+     * paxos_log lock, as the learner does, so the two never race on an entry. */
+    public void installDecided (List<DidaTradePaxos.DecidedCommand> commands) {
+	int installed = 0;
+	synchronized (this.paxos_log) {
+	    for (DidaTradePaxos.DecidedCommand command : commands) {
+		PaxosInstance entry = this.paxos_log.testAndSetEntry(command.getPosition());
+		int id = command.getCommandId();
+		// The command body is needed even where the decision itself was
+		// learned already: that is exactly the case of a client request
+		// sent while this replica was down.
+		if (id != MainLoop.NOOP && this.req_history.getIfExists(id) == null) {
+		    DidaTradeAction action = DidaTradeAction.values()[command.getAction()];
+		    DidaTradeCommand body = new DidaTradeCommand(action, command.getUserid(), command.getQuantity(), command.getStock());
+		    this.req_history.addToPending(id, new RequestRecord(id, body));
+		    if (entry.decided)
+			installed++;   // decision already learned, only the command was missing
+		}
+		if (entry.decided)
+		    continue;
+		entry.accept_ballot = Math.max(entry.accept_ballot, command.getBallot());
+		entry.decided_value = id;
+		entry.decided       = true;
+		this.noteDecided(command.getPosition());
+		installed++;
+	    }
+	}
+	if (installed > 0) {
+	    System.out.println("State transfer: installed " + installed + " decided positions");
+	    this.main_loop.wakeup();
+	}
+    }
+
+    /* Whether this acceptor has ever voted, as reported to a recovering peer. */
+    public boolean hasVotes () {
+	for (PaxosInstance entry : this.paxos_log.snapshotFrom(0))
+	    if (entry.write_ballot >= 0)
+		return true;
+	return false;
     }
 
     public synchronized boolean getFastPaxosMode () {
