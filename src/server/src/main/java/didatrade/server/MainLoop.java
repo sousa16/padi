@@ -24,6 +24,7 @@ public class MainLoop implements Runnable {
 
     DidaTradeServerState server_state;
     private boolean has_work;
+    private final Object proposal_lock = new Object();
 
     // Contadores separados para permitir o Pipelining (Multi-Paxos)
     private volatile int next_instance_to_propose;
@@ -134,24 +135,45 @@ public class MainLoop implements Runnable {
                 break; // Acabaram-se os pedidos por propor
             }
 
-            int instance = this.next_instance_to_propose;
-            if (!fast) {
-                PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(instance);
-                if (entry.decided) {
-                    this.next_instance_to_propose++;
-                    continue;
+            this.proposed_requests.add(request_record.getId());
+            startProposalThread(ballot, fast, request_record.getId());
+        }
+    }
+
+    /**
+     * Give every client command its own proposer thread. Multi-Paxos still
+     * assigns each command a unique slot; which thread reserves first determines
+     * the proposal order. Fast Paxos lets each command race at the acceptors.
+     */
+    private void startProposalThread(int ballot, boolean fast, int request_id) {
+        Thread proposer = new Thread(() -> {
+            if (this.server_state.getCurrentBallot() != ballot) {
+                return;
+            }
+            if (fast) {
+                if (this.server_state.getFastAnyBallot() == ballot) {
+                    sendFastProposal(ballot, request_id);
                 }
+                return;
             }
 
-            this.proposed_requests.add(request_record.getId());
-            if (fast) {
-                sendFastProposal(ballot, request_record.getId());
+            int reserved_instance;
+            synchronized (this.proposal_lock) {
+                if (this.server_state.getCurrentBallot() != ballot) {
+                    return;
+                }
+                reserved_instance = this.next_instance_to_propose;
+                PaxosInstance entry = this.server_state.paxos_log.testAndSetEntry(reserved_instance);
+                while (entry.decided) {
+                    reserved_instance++;
+                    entry = this.server_state.paxos_log.testAndSetEntry(reserved_instance);
+                }
+                this.next_instance_to_propose = reserved_instance + 1;
             }
-            else {
-                sendPhaseTwo(instance, ballot, request_record.getId());
-                this.next_instance_to_propose++;
-            }
-        }
+            sendPhaseTwo(reserved_instance, ballot, request_id);
+        }, "paxos-proposal-" + ballot + "-" + request_id);
+        proposer.setDaemon(true);
+        proposer.start();
     }
 
     /**
@@ -383,6 +405,7 @@ public class MainLoop implements Runnable {
      * its lowest open position and returns that position in the reply. */
     private void sendFastProposal(int ballot, int value) {
         this.fast_pending_values.add(value);
+        wakeup();
         DidaTradePaxos.PhaseTwoRequest request = DidaTradePaxos.PhaseTwoRequest.newBuilder()
                 .setRequestballot(ballot).setValue(value).setAllocate(true).build();
         for (int target : this.server_state.scheduler.acceptors(ballot)) {
