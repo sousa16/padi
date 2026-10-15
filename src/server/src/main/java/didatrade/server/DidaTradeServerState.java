@@ -121,7 +121,7 @@ public class DidaTradeServerState {
     public synchronized void setCurrentBallot (int ballot) {
 	if (ballot > this.current_ballot) {
 	    this.current_ballot = ballot;
-	    this.notifyAll();
+	    this.main_loop.onBallotChanged(ballot);
 	}
     }
 
