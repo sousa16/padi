@@ -57,6 +57,17 @@ public class RequestHistory {
         this.pending.put(id, record);
     }
 
+    /* Step 5: the command may already be here, brought by a state transfer
+     * before the client's own copy arrived. Hand back that record (already
+     * answered, if it was executed) rather than queueing the command twice. */
+    public synchronized RequestRecord addIfAbsent(int requestid, RequestRecord record) {
+        RequestRecord existing = getIfExists(requestid);
+        if (existing != null)
+            return existing;
+        addToPending(requestid, record);
+        return record;
+    }
+
     public synchronized RequestRecord moveToProcessed(int requestid) {
         Integer id = new Integer(requestid);
         RequestRecord record = this.pending.remove(id);

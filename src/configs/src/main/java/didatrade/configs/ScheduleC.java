@@ -58,11 +58,10 @@ public class ScheduleC extends Schedule {
 	    return new Integer(5);
     }
         
+    /* Both acceptor sets have 5 members, so a majority is 3 in every ballot.
+     * (2 of 5 would let two disjoint quorums decide different values.) */
     public Integer quorum (int ballot) {
-	if (ballot < 2)
-	    return new Integer(2);
-	else 
-	    return new Integer(3);
+	return new Integer(3);
     }
 
     public boolean fastpaxos(int ballot) {

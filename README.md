@@ -108,7 +108,7 @@ No compose service sets a restart policy, so a crashed replica stays down until
 
 ## TODO
 
-Going for Premium: steps 1 and 2 by the checkpoint, 3 and 4 by the final.
+Going for Ultimate: steps 1 and 2 by the checkpoint, 3, 4 and 5 by the final.
 Checkpoint is 30 Sep, final is 16 Oct.
 
 - [x] Step 1 — debug modes (crash, freeze, un-freeze, slow-mode) and a real Paxos
@@ -127,9 +127,47 @@ Checkpoint is 30 Sep, final is 16 Oct.
       `balance` sends `min_slot`, and a replica answers it locally, without
       consensus, only once it has executed that far. A lagging replica waits
       ("balance … waiting for slot N (at M)") rather than answering stale.
-- [ ] Step 5 — dynamic membership and state transfer, Schedule B (spec §6).
-      Schedule C is wired up too: 7 replicas, and the acceptor set really does
-      change ({0,1,2,3,4} → {2,3,4,5,6} at Config3), so it is the harder case to
-      test state transfer against.
-- [ ] Report, 6 pages. Must include the AI-use declaration (spec §13) and the
-      authorship declaration (§14).
+- [x] Step 5 — dynamic membership and state transfer, on Schedules B and C
+      (C is where the acceptor set really changes, {0..4} → {2..6} at Config 2).
+      - *Completed ballot* (Vertical Paxos): a ballot is complete only once its
+        leader finished phase 1, every recovered value is accepted by a quorum
+        of that ballot's acceptors and, if the acceptor set changed, those
+        acceptors hold the decided log (`installstate` push). Learners no longer
+        guess it. The console relays it (`ballot`/`activate`), so the next
+        leader's phase 1 skips acceptors that left.
+      - *State transfer, pull*: a replica stuck on a gap, or on a decided
+        command whose client request never reached it, asks its peers
+        (`fetchstate`) for the decided positions *with the commands*.
+      - *Recovery*: a restarted replica fetches the log from its peers and
+        replays it. Having lost its promises and votes, it abstains as an
+        acceptor from every ballot up to the highest its peers report.
+      - Fixed `ScheduleC.quorum`: it was 2 of 5 acceptors (two quorums could be
+        disjoint); it is now 3.
+- [ ] Report, 6 pages, `report/latex8.tex`. AI-use (§13) and authorship (§14)
+      declarations are in, but the student numbers and contributions are
+      placeholders.
+
+## Testing Step 5 by hand
+
+    ./dev.sh up C
+    ./dev.sh app                 # populate 10, a few buy/sell (ballot 0, fast)
+    ./dev.sh console C           # ballot 2 3   -> leader 3, acceptors {2..6}
+                                 #   expect "completed = 2" back, and
+                                 #   "State transfer: acceptor set changed" in s3
+    ./dev.sh stop 0; ./dev.sh stop 1    # they left the configuration
+    console> ballot 3 4          # phase 1 now only asks {2..6}
+    ./dev.sh stop 6; (more ops); ./dev.sh start 6
+    ./dev.sh logs 6              # "Recovery: rejoining at ballot ..." and the replay
+
+## Automated tests (Schedules A, B, C)
+
+The scripts in `scripts/test/` start the replicas as plain java processes inside
+one container, drive them with scripted clients and console commands, crash and
+restart replicas, and check that every replica executed the same sequence of
+commands. From the repo root (needs `./dev.sh build` or the podman command below
+to have been run once):
+
+    podman run --rm -v "$PWD/src:/work/src" -v "$PWD/scripts:/work/scripts" -v padi_m2:/root/.m2 \
+        --entrypoint bash didatrade:dev /work/scripts/test/run.sh testA   # or testB / testC
+
+Look for `OK: executed sequences agree` after each scenario.

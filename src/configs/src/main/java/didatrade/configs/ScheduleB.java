@@ -4,9 +4,9 @@ import java.util.*;
 import didatrade.configs.Schedule;
 
 public class ScheduleB extends Schedule {
-    private List<Integer> all_participants = Arrays.asList(0, 1, 2);
-    private List<Integer> all_learners     = Arrays.asList(0, 1, 2);
-    private List<Integer> all_acceptors    = Arrays.asList(0, 1, 2);
+    private List<Integer> all_participants = Arrays.asList(0, 1, 2, 3, 4);
+    private List<Integer> all_learners     = Arrays.asList(0, 1, 2, 3, 4);
+    private List<Integer> all_acceptors    = Arrays.asList(0, 1, 2, 3, 4);
 	
     public ScheduleB() {
     }
@@ -36,13 +36,13 @@ public class ScheduleB extends Schedule {
     }
     
     public Integer leader (int ballot) {
-	int leader = ballot % 3;
+	int leader = ballot % 5;
 	
 	return new Integer(leader);
     }
 
     public Integer quorum (int ballot) {
-	return new Integer(2);
+	return new Integer(3);
     }
     
     public boolean fastpaxos (int ballot) {

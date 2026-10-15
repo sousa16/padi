@@ -30,7 +30,12 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 
 	    this.server_state.main_loop.wakeup();
 
-	    completed_ballot = this.server_state.waitForCompletedBallot(new_ballot);
+	    // Only the leader of new_ballot runs its phase 1 and completes it;
+	    // anyone else would leave the console waiting forever.
+	    if (this.server_state.scheduler.leader(new_ballot) == this.server_state.my_id)
+		completed_ballot = this.server_state.waitForCompletedBallot(new_ballot);
+	    else
+		completed_ballot = this.server_state.getCompletedBallot();
 	}
 	else {
 	    completed_ballot = this.server_state.getCompletedBallot();
@@ -56,8 +61,12 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 	// for debug purposes
 	System.out.println("Current ballot = " + this.server_state.getCurrentBallot() + " activated ballot = " + completed_ballot);
 
-	// do stuff
-	
+	// Vertical Paxos: the console (the master) tells the leader which ballot is
+	// complete, so its phase 1 only needs the acceptors from that ballot on.
+	// Ballots before it may belong to replicas that have left the configuration.
+	this.server_state.setCompletedBallot (completed_ballot);
+	this.server_state.main_loop.wakeup();
+
 	DidaTradeMaster.ActivateReply.Builder response_builder = DidaTradeMaster.ActivateReply.newBuilder();
 	response_builder.setReqid(request_id);
 	response_builder.setAck(true);

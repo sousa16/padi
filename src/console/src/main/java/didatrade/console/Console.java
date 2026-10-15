@@ -108,6 +108,7 @@ public class Console {
 	        case "help":
                     System.out.println("\thelp");
                     System.out.println("\tballot number replica");
+                    System.out.println("\tactivate number replica");
 		    System.out.println("\tdebug mode replica");
 		    System.out.println("\texit");
                     break;
@@ -158,8 +159,8 @@ public class Console {
 			System.out.println("usage: ballot number replica");
                     break;
                case "activate":
-		    System.out.println("activate " + parameter1);
-                    if (parameter1 != null) {
+		    System.out.println("activate " + parameter1 + " " + parameter2);
+                    if ((parameter1 != null) && (parameter2 != null)) {
 			int ballot_number  =  Integer.parseInt(parameter1);
 			if (ballot_number < this.getLastBallot())
 			    System.out.println("usage: ballot must be larger or equal than " + last_ballot + ".\n");
@@ -198,7 +199,7 @@ public class Console {
 			    }
 			}
 		    } else 
-			System.out.println("usage: activate replica");
+			System.out.println("usage: activate number replica");
                     break;
               case "debug":
 		    System.out.println("debug " + parameter1 + " " + parameter2);
