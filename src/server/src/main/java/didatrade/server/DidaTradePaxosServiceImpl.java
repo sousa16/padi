@@ -120,6 +120,10 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	    return;
 	}
 
+	if (allocate && this.server_state.scheduler.fastpaxos(ballot)) {
+	    this.server_state.waitForFastBallot(ballot);
+	}
+
 	synchronized (acceptor_lock) {
 	    if (ballot < this.server_state.getCurrentBallot()) {
 		maxballot = this.server_state.getCurrentBallot();
@@ -202,7 +206,7 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    GenericResponseCollector<DidaTradePaxos.LearnReply> learn_collector = new GenericResponseCollector<DidaTradePaxos.LearnReply>(learn_responses, n_targets);;
 		    for (int i = 0; i < n_targets; i++) {
 			CollectorStreamObserver<DidaTradePaxos.LearnReply> learn_observer = new CollectorStreamObserver<DidaTradePaxos.LearnReply>(learn_collector);
-			this.server_state.async_stubs[learners.get(i)].learn(learn_request, learn_observer);
+			this.server_state.async_stubs[learners.get(i)].withWaitForReady().learn(learn_request, learn_observer);
 		    }
 		});
 	}

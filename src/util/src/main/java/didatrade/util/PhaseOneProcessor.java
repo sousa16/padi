@@ -15,7 +15,7 @@ import didatrade.configs.ConfigurationScheduler;
  * enough" = majority of the acceptors of every ballot from low_ballot to high_ballot
  * 
  * ballots before low_ballot are known to be finished, so they need no checking.
- * in schedules A and B every ballot has the same acceptors, so this is simply "a majority of {0,1,2}".
+ * in schedules A and B every ballot has the same acceptors, so this is simply a majority of that set.
  * in schedule C, different ballots have different acceptors, so we need a majority of all groups of acceptors.
  *
  * phase 1 fails as soon as one acceptor refuses, because that acceptor has already promised a higher ballot.

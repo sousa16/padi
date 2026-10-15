@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Schedule B: basic ops, two concurrent clients (fast-paxos collisions and the
-# automatic move to the next ballot), then crash + restart of B replica.
+# Schedule B: five Fast Paxos replicas, basic ops, two concurrent clients
+# (fast-paxos collisions and the automatic move to the next ballot), then restart.
 LOG=/tmp/logsB; rm -rf $LOG
 source /work/scripts/test/lib.sh
-for i in 0 1 2; do start $i B; done
+for i in 0 1 2 3 4; do start $i B; done
 sleep 5
 
 echo "== T1 basic ops"
@@ -15,8 +15,8 @@ client 2 B "lenght 15" "looprandom" & c2=$!
 client 3 B "lenght 15" "looprandom" & c3=$!
 wait $c2 $c3
 sleep 2
-echo "   collisions: $(grep -h 'collision' $LOG/s*.log | wc -l), stall bumps: $(grep -h 'sem decis??o' $LOG/s*.log | wc -l)"
-compare 0 1 2
+echo "   collisions: $(grep -h 'collision' $LOG/s*.log | wc -l)"
+compare 0 1 2 3 4
 
 echo "== T3 crash replica 2, keep going, restart it"
 kill_replica 2
@@ -27,6 +27,6 @@ client 5 B "sell 3 20" "buy 4 20" "balance 4"
 sleep 3
 grep -h "Recovery\|State transfer: installed\|abstaining" $LOG/s2.log | sort | uniq -c | head
 grep -h "balance is" $LOG/c5.log | tail -1
-compare 0 1 2
+compare 0 1 2 3 4
 if [ "$(executed 2 | wc -l)" -lt "$(executed 0 | wc -l)" ]; then kill -3 "${PID[2]}"; sleep 1; fi
 finish

@@ -119,8 +119,10 @@ public class DidaTradeServerState {
     }
     
     public synchronized void setCurrentBallot (int ballot) {
-	if (ballot > this.current_ballot)
+	if (ballot > this.current_ballot) {
 	    this.current_ballot = ballot;
+	    this.notifyAll();
+	}
     }
 
     public synchronized int getCompletedBallot () {
@@ -175,7 +177,23 @@ public class DidaTradeServerState {
 	if (ballot > this.fast_any_ballot) {
 	    this.fast_any_ballot = ballot;
 	    this.fast_any_from   = from;
+	    this.notifyAll();
 	}
+    }
+
+    /* A proposal can arrive before the leader's "any" because RPCs may be reordered.
+     * Wait for that protocol event instead of resending the proposal after a timer. */
+    public synchronized boolean waitForFastBallot (int ballot) {
+	while (this.fast_any_ballot < ballot && this.current_ballot <= ballot) {
+	    try {
+		this.wait();
+	    }
+	    catch (InterruptedException e) {
+		Thread.currentThread().interrupt();
+		return false;
+	    }
+	}
+	return this.fast_any_ballot == ballot;
     }
 
     public synchronized int getFastAnyBallot () {
