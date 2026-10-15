@@ -281,12 +281,10 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 		    this.server_state.main_loop.wakeup ();
 		}
 		else if (collided(entry, ballot)) {
-		    // No value can reach the fast quorum any more in this ballot. Moving
-		    // to the next ballot is safe, its phase 1 recovers anything that may
-		    // have been chosen.
+		    // A fast quorum has voted without agreeing on a value. The ballot
+		    // transition wakes the scheduled leader to run Vertical Paxos.
 		    System.out.println("Paxos learner: collision in instance " + instance + ", moving to ballot " + (ballot + 1));
 		    this.server_state.setCurrentBallot(ballot + 1);
-		    this.server_state.main_loop.wakeup ();
 		}
 	    }
 	}
@@ -348,19 +346,18 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
 	responseObserver.onCompleted();
     }
 
-    /* Fast ballots only: true when no value can still collect a decision quorum. */
+    /* Fast ballots fail once a fast quorum has voted without agreeing on one value. */
     private boolean collided(PaxosInstance entry, int ballot) {
 	if (!this.server_state.scheduler.fastpaxos(ballot))
 	    return false;
 	int needed    = this.server_state.scheduler.decisionquorum(ballot);
-	int voted     = 0;
+	Set<Integer> voters = new HashSet<Integer>();
 	int best      = 0;
-	for (Set<Integer> voters : entry.votes.values()) {
-	    voted += voters.size();
-	    best   = Math.max(best, voters.size());
+	for (Set<Integer> value_voters : entry.votes.values()) {
+	    voters.addAll(value_voters);
+	    best = Math.max(best, value_voters.size());
 	}
-	int missing = this.server_state.scheduler.acceptors(ballot).size() - voted;
-	return best + missing < needed;
+	return voters.size() >= needed && best < needed;
     }
 
 }

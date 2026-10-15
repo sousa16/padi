@@ -28,8 +28,6 @@ public class DidaTradeMasterServiceImpl extends DidaTradeMasterServiceGrpc.DidaT
 	if (new_ballot > this.server_state.getCurrentBallot()) {
 	    this.server_state.setCurrentBallot (new_ballot);
 
-	    this.server_state.main_loop.wakeup();
-
 	    // Only the leader of new_ballot runs its phase 1 and completes it;
 	    // anyone else would leave the console waiting forever.
 	    if (this.server_state.scheduler.leader(new_ballot) == this.server_state.my_id)

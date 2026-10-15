@@ -167,6 +167,13 @@ public class MainLoop implements Runnable {
         notifyAll();
     }
 
+    /** A higher ballot wakes every replica; the schedule selects which one leads Vertical Paxos. */
+    void onBallotChanged(int ballot) {
+        int leader = this.server_state.scheduler.leader(ballot);
+        System.out.println("Vertical Paxos: ballot " + ballot + " is assigned to leader " + leader);
+        wakeup();
+    }
+
     private boolean isLeader(int ballot) {
         return ballot >= 0 && this.server_state.scheduler.leader(ballot) == this.server_state.my_id;
     }
@@ -193,7 +200,7 @@ public class MainLoop implements Runnable {
         // Corre logo, mesmo sem pedidos: só no fim da Fase 1 (e da transferência de estado) o
         // ballot fica completo, e a consola espera por isso para avançar a configuração
         if (leader && ballot > this.phase1_completed_ballot) {
-            if (!runPhaseOne(ballot)) {
+            if (!runVerticalPaxos(ballot)) {
                 return;
             }
             if (fast) {
@@ -321,7 +328,13 @@ public class MainLoop implements Runnable {
      * posição, o líder volta a propor (Fase 2, com o novo ballot) o valor com o maior ballot.
      * Posições sem valor em nenhuma resposta são preenchidas com no-ops.
      */
-    private boolean runPhaseOne(int ballot) {
+    private boolean runVerticalPaxos(int ballot) {
+        int leader = this.server_state.scheduler.leader(ballot);
+        if (leader != this.server_state.my_id) {
+            return false;
+        }
+        System.out.println("Vertical Paxos: leader " + leader + " starting ballot " + ballot);
+
         int from = this.next_instance_to_execute;
         System.out.println("Multi-Paxos: A correr Fase 1 a partir da instância " + from + " (Ballot " + ballot + ")");
 
