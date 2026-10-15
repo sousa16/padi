@@ -41,7 +41,17 @@ public class ScheduleB extends Schedule {
 	return new Integer(leader);
     }
 
+    /* 5 acceptors: classic 3 of 5, fast 4 of 5, recovery 3 of 5.
+     * Fast Paxos needs classic + fast > 5 and recovery + 2*fast > 2*5. */
     public Integer quorum (int ballot) {
+	return new Integer(3);
+    }
+
+    public Integer fastquorum (int ballot) {
+	return new Integer(4);
+    }
+
+    public Integer recoveryquorum (int ballot) {
 	return new Integer(3);
     }
     

@@ -34,7 +34,7 @@ On Apple Silicon this does not work at all: protoc 3.12.0 publishes no
     ./dev.sh app       # interactive client
 
 `./dev.sh` on its own lists every command. `up`, `app` and `console` all take a
-schedule: `A` (default) and `B` run replicas 0-2, `C` runs 0-6 on ports
+schedule: `A` (default) runs replicas 0-2, `B` runs 0-4, `C` runs 0-6 on ports
 20000-20006. Pass the same schedule to all three.
 
 `app` also takes a client id, `./dev.sh app 2` (or `./dev.sh app 2 C`), default 1.

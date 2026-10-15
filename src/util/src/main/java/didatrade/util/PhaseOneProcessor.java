@@ -97,7 +97,7 @@ public class PhaseOneProcessor extends GenericResponseProcessor<DidaTradePaxos.P
 	    for (Integer acceptor : this.scheduler.acceptors(ballot))
 		if (this.promised.contains(acceptor))
 		    count++;
-	    if (count < this.scheduler.quorum(ballot))
+	    if (count < this.scheduler.recoveryquorum(ballot))
 		return false;
 	}
 	return true;

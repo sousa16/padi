@@ -66,10 +66,14 @@ public class ConfigurationScheduler {
 	return s.fastpaxos(ballot);
     }
 
-    /* Fast Paxos quorum: ceil(3n/4) of the ballot's acceptors (3 of 3 or 4 of 5). */
+    /* Super-majority of a fast ballot, as defined by the schedule. */
     public Integer fastquorum(int ballot) {
-	int n = s.acceptors(ballot).size();
-	return (3 * n + 3) / 4;
+	return s.fastquorum(ballot);
+    }
+
+    /* Promises a leader needs in phase 1, as defined by the schedule. */
+    public Integer recoveryquorum(int ballot) {
+	return s.recoveryquorum(ballot);
     }
 
     /* Votes a learner needs to see for the same value before it is decided. */

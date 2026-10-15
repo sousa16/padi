@@ -107,7 +107,7 @@ public class MainLoop implements Runnable {
             // Wait for a quorum of answers, not for all of them: a peer that is gone for good
             // (Schedule C: replicas 0 and 1 leave) never answers, and waiting for it would
             // block recovery, and with it this acceptor, forever. No timeout is needed.
-            collector.waitForQuorum(Math.min(peers.size(), this.server_state.scheduler.quorum(0)));
+            collector.waitForQuorum(Math.min(peers.size(), this.server_state.scheduler.recoveryquorum(0)));
 
             synchronized (collector) {
                 for (DidaTradePaxos.FetchStateReply reply : replies) {

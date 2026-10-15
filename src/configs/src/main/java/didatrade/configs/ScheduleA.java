@@ -41,7 +41,16 @@ public class ScheduleA extends Schedule {
 	return new Integer(leader);
     }
 
+    /* 3 acceptors: classic 2 of 3, fast 3 of 3, recovery 2 of 3. */
     public Integer quorum (int ballot) {
+	return new Integer(2);
+    }
+
+    public Integer fastquorum (int ballot) {
+	return new Integer(3);
+    }
+
+    public Integer recoveryquorum (int ballot) {
 	return new Integer(2);
     }
     

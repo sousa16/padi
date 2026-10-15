@@ -18,11 +18,15 @@ sleep 2
 echo "   collisions: $(grep -h 'collision' $LOG/s*.log | wc -l)"
 compare 0 1 2 3 4
 
-echo "== T3 crash replica 2, keep going, restart it"
+echo "== T3 crash replica 2; manual reconfiguration to ballot 100 (leader 0); keep going (single client, so no collisions)"
 kill_replica 2
+console B 'echo "ballot 100 0"; sleep 6'
+grep -h "reply received" $LOG/console.log | tail -1
 client 4 B "lenght 10" "looprandom"
+
+echo "== T4 restart replica 2"
 start 2 B
-sleep 4
+sleep 6
 client 5 B "sell 3 20" "buy 4 20" "balance 4"
 sleep 3
 grep -h "Recovery\|State transfer: installed\|abstaining" $LOG/s2.log | sort | uniq -c | head

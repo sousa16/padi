@@ -9,7 +9,7 @@
 # which is what Step 5 needs, since state transfer is only observable when a
 # replica can be stopped and brought back while the others keep running.
 #
-# Schedules: A and B use replicas 0-2, C uses 0-6 (acceptors change from
+# Schedules: A uses replicas 0-2, B uses 0-4, C uses 0-6 (acceptors change from
 # {0,1,2,3,4} to {2,3,4,5,6} at Config3). SCHEDULE is set by dev.sh.
 
 x-replica: &replica

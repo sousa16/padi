@@ -64,6 +64,15 @@ public class ScheduleC extends Schedule {
 	return new Integer(3);
     }
 
+    /* Same 5-acceptor numbers as schedule B: fast 4 of 5, recovery 3 of 5. */
+    public Integer fastquorum (int ballot) {
+	return new Integer(4);
+    }
+
+    public Integer recoveryquorum (int ballot) {
+	return new Integer(3);
+    }
+
     public boolean fastpaxos(int ballot) {
 	return ((ballot == 0)||(ballot ==2));
     }

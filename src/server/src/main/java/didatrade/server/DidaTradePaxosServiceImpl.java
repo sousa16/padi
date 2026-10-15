@@ -224,8 +224,15 @@ public class DidaTradePaxosServiceImpl extends DidaTradePaxosServiceGrpc.DidaTra
     /* Fast proposals have no slot until each acceptor places them. Repeated
      * deliveries of the same request reuse its slot rather than consuming one.
      * A vote from an older ballot does not hold a slot: the leader's "any"
-     * only opens positions where its phase 1 found nothing could be chosen. */
+     * only opens positions where its phase 1 found nothing could be chosen.
+     * A request this acceptor already knows to be decided gets no new slot: a late
+     * duplicate would otherwise be voted into the next slot by this acceptor alone,
+     * where it collides with the following command, and with an acceptor down the
+     * fast quorum can then never be reached. */
     private int lowestOpenFastInstance(int ballot, int value) {
+	for (PaxosInstance known : this.server_state.paxos_log.snapshotFrom(0))
+	    if (known.decided && known.decided_value == value)
+		return -1;
 	int instance = this.server_state.getFastAnyFrom();
 	while (instance >= 0) {
 	    PaxosInstance entry = this.server_state.paxos_log.getEntry(instance);

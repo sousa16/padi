@@ -22,10 +22,11 @@ fi
 # enabling profiles never starts anything extra.
 compose() { "$ENGINE" compose --profile extended --profile tools "$@"; }
 
-# Schedules A and B run replicas 0-2; C runs 0-6.
+# Schedule A runs replicas 0-2; B runs 0-4; C runs 0-6.
 replicas_for() {
     case "$1" in
-        A|B) echo "s0 s1 s2" ;;
+        A)   echo "s0 s1 s2" ;;
+        B)   echo "s0 s1 s2 s3 s4" ;;
         C)   echo "s0 s1 s2 s3 s4 s5 s6" ;;
         *)   echo "unknown schedule '$1' (expected A, B or C)" >&2; exit 1 ;;
     esac
@@ -36,7 +37,7 @@ usage() {
 usage: ./dev.sh <command> [args]
 
   build              build the image and compile the tree
-  up [A|B|C]         run a schedule (default A). A/B use 3 replicas, C uses 7
+  up [A|B|C]         run a schedule (default A). A uses 3 replicas, B 5, C 7
   app [id] [A|B|C]   attach an interactive client (id 1-99, default 1)
   console [A|B|C]    attach the admin console (crash/freeze/slow-mode/reconfig)
   shell              JDK 22 + Maven shell, source at /work/src
