@@ -23,8 +23,7 @@ Design and Implementation of Distributed Applications 2026/27 --- Group 38
 
 We implemented Steps 1--5 (Ultimate goal): the real phase 1 and the debug
 modes, Multi-Paxos, Fast Paxos, a causally ordered \texttt{balance}, and
-dynamic membership with state transfer (Schedule B with five acceptors, and
-Schedule C). The protocol uses no timeouts. Progress comes only from protocol
+dynamic membership with state transfer. Progress comes only from protocol
 events, plus manual reconfiguration from the console.
 
 %-------------------------------------------------------------------------
@@ -73,17 +72,19 @@ it, instead of being refused.
 \textbf{Quorums.} We extended the \texttt{Schedule} interface with
 \texttt{fastquorum} (the super-majority) and \texttt{recoveryquorum} (the
 promises needed in phase 1), alongside the existing \texttt{quorum}. With 3
-acceptors they are 3 and 2 (classic quorum 2). With 5 acceptors they are 4 and
-3 (classic quorum 3).
+acceptors the {fastquorum} is 3 and the {recoveryquorum} is 2. With 5 
+acceptors they are 4 and 3.
+
 
 \textbf{Collisions and recovery.} A learner declares a collision when a fast
 quorum of distinct acceptors has voted in a position without agreeing on a
 value. It then moves to the next ballot, whose scheduled leader starts phase 1
 on its own; this is the automatic reconfiguration of the specification. For
-each position, the new leader looks at the highest ballot $k$ voted by its
-recovery quorum $Q$. If $k$ was fast, a value $v$ may have been chosen only if
-at least $|Q|+F-n$ acceptors of $Q$ voted $v$ in $k$. Such a value must be
+each position, the new leader looks at the highest ballot voted by its
+recovery quorum. If that ballot was fast, a value may have been chosen only if
+that value was the majority in any quorum of acceptors. Such a value must be
 re-proposed; otherwise any reported value is safe.
+
 
 \textbf{Auxiliary structures.} Each proposer keeps \texttt{fast\_marks}, a map
 from position to the request it saw voted there in the current fast ballot.
@@ -143,9 +144,6 @@ other acceptors can still form a quorum. A peer that receives
 which could otherwise reject calls to the restarted replica for up to two
 minutes.
 
-\textbf{Schedule fixes.} \texttt{ScheduleC} used a classic quorum of 2 out of
-5 acceptors, which allowed disjoint quorums; it is now 3. \texttt{ScheduleB}
-has five acceptors.
 
 %-------------------------------------------------------------------------
 \Section{Limitations}
@@ -162,8 +160,9 @@ but it is not a proof. The transferred log grows without bound.
 
 % TODO(group): this declaration must be accurate. Review it before submitting,
 % and state precisely which tools were used and for what.
-``All design choices and the code have been by us. The following tools
-[list the tools] have been used for this purpose [list the purpose].''
+``All design choices and the code have been by us. The following tools:
+Copilot, Claude; have been used for this purpose: implementing code,
+sketching the report.''
 
 \section*{Authorship}
 
@@ -177,11 +176,12 @@ participation of the following group members. The individual contributions
 were:
 Diogo Cruz --- [summary of contribution];
 Jo\~ao Sousa --- [summary of contribution];
-Tom\'as Monteiro --- [summary of contribution].
+Tom\'as Monteiro --- Multi Paxos and Fast Paxos implementation, Overall review
+and fixes.
 We declare that this work is original and complies with the applicable
 academic regulations.
 
-Lisboa, [date] \hfill Signatures:
+Lisboa, October 16th 2026 \hfill Signatures:
 }
 
 \end{document}
