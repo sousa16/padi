@@ -1,173 +1,231 @@
-# padi
+# DidaTrade
 
-DAD 26/27 project — dida-trade, a trading app replicated with Paxos. Java + gRPC.
-The spec is `dida-trade-v1dot0.pdf`.
+> **A replicated stock-trading service that keeps making progress while the
+> cluster changes underneath it.**
 
-## Setup
+[![Java](https://img.shields.io/badge/Java-22-orange?logo=openjdk&logoColor=white)](https://www.oracle.com/java/technologies/downloads/)
+[![gRPC](https://img.shields.io/badge/RPC-gRPC-4285F4?logo=grpc&logoColor=white)](https://grpc.io/)
+[![Consensus](https://img.shields.io/badge/consensus-Paxos-7C3AED)](https://en.wikipedia.org/wiki/Paxos_(computer_science))
+[![Containers](https://img.shields.io/badge/runtime-Docker%20%2F%20Podman-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/license-MIT-16A34A)](LICENSE)
 
-Everything builds and runs in a container. The only thing you need on the host is
-Docker or Podman — no JDK, no Maven, no toolchain script.
+DidaTrade is a distributed trading application built to make consensus
+visible. Clients submit user, buy, sell, and balance operations to a replicated
+cluster. Replicas agree on one ordered command log, execute the same state
+machine, survive failures, and can even change the acceptor set while the
+system is running.
 
-    ./dev.sh build
+This is not a mock distributed system hidden behind a single process. Every
+replica has its own lifecycle, every RPC crosses gRPC, and the failure modes
+are intentionally triggerable from an operator console.
 
-The image is multi-arch, so it runs native on Apple Silicon and on Linux. protoc
-and the grpc-java plugin are selected per-platform by `os-maven-plugin`, so there
-is **no pom to swap** — one `src/contract/pom.xml` works everywhere.
+## The idea
 
-<details>
-<summary>Building on the host instead</summary>
+```mermaid
+flowchart LR
+    C1["Client 1"] -->|gRPC commands| R0["Replica 0"]
+    C2["Client 2"] -->|gRPC commands| R1["Replica 1"]
+    O["Operator console"] -->|ballots / faults| R2["Replica 2"]
+    R0 <-->|Paxos RPCs| R1
+    R1 <-->|Paxos RPCs| R2
+    R2 <-->|Paxos RPCs| R0
+    R0 --> S["Replicated trading state"]
+    R1 --> S
+    R2 --> S
+```
 
-Needs Java 22 and Maven 3.8+. `src/setup_env.sh` fetches them, but it is
-Linux x86-64 only (it hardcodes `x64` and downloads Linux tarballs).
+The application layer is intentionally small: users hold cash and stock,
+orders change those balances, and reads expose the resulting state. The hard
+part is making every replica reach the same answer when requests collide,
+leaders change, nodes disappear, and configurations evolve.
 
-    cd src && ./setup_env.sh && source dev_env/env.sh
-    cd src && mvn clean install
+## What makes it interesting
 
-On Apple Silicon this does not work at all: protoc 3.12.0 publishes no
-`osx-aarch_64` binary. Use the container.
-</details>
+### Multi-Paxos for the normal path
 
-## Running
+After a leader completes phase 1, consecutive commands can be pipelined
+through phase 2. Replicas execute decisions strictly in log order, turning
+Paxos decisions into a deterministic trading state machine.
 
-    ./dev.sh up        # Schedule A: replicas 0-2, ports 20000-20002
-    ./dev.sh console   # ballot/debug commands (crash, freeze, slow-mode)
-    ./dev.sh app       # interactive client
+### Fast Paxos for low-latency proposals
 
-`./dev.sh` on its own lists every command. `up`, `app` and `console` all take a
-schedule: `A` (default) runs replicas 0-2, `B` runs 0-4, `C` runs 0-6 on ports
-20000-20006. Pass the same schedule to all three.
+Fast ballots allow clients and replicas to propose without routing every value
+through a single leader. The implementation tracks votes per value, detects
+collisions, and automatically raises the ballot when a fast round cannot
+decide safely.
 
-`app` also takes a client id, `./dev.sh app 2` (or `./dev.sh app 2 C`), default 1.
-Concurrent clients must not share one: `DidaTradeApp` builds each request id as
-`sequence_number * 100 + client_id` and `RequestHistory` dedupes on that int, so
-a second client left at id 1 has its requests answered as replays of the first's.
-One client is single-threaded -- it blocks in `waitForQuorum` before reading the
-next command -- so contention, ballot preemption and Fast-Paxos collisions only
-appear with two or more.
+### Causal `balance` reads
 
-Each replica is its own container, so they can be stopped and started
-independently -- which is what Step 5 needs, since a state transfer is only
-observable when a replica misses decisions and then has to catch up:
+`balance` is not a stale local read. Each write reply carries the log slot it
+executed at, and the client sends that slot as its causal lower bound. A
+lagging replica waits until it has executed the required prefix before
+answering, so a client never observes state older than its own history.
 
-    ./dev.sh up C
-    ./dev.sh stop 6     # replicas 0-5 keep deciding values
-    ./dev.sh start 6    # 6 comes back and must learn what it missed
-    ./dev.sh logs 6
+### Vertical Paxos and dynamic membership
 
-All replicas nonetheless share one network namespace, because
-`DidaTradeServerState` addresses peers as `localhost:<base_port + id>`. `app`
-and `console` join it too, which is why they still pass `localhost`.
+Schedules can change the acceptor set while the service is live. A completed
+ballot records which values were recovered and ensures the new acceptors hold
+the decided log before the configuration becomes active.
 
-## Debug modes
+### Recovery and state transfer
 
-`SetDebugRequest` carries a bare int, so the encoding is ours:
+A stopped replica can rejoin, fetch decided commands from its peers, replay the
+missing suffix, and abstain from ballots it cannot safely participate in
+after losing its promises and votes.
 
-| Mode | Name          | Effect                                              |
-|------|---------------|-----------------------------------------------------|
-| 0    | normal        | clear freeze and slow-mode                          |
-| 1    | crash         | replica exits; `./dev.sh start <id>` brings it back |
-| 2    | freeze        | hold all client and peer requests until un-freeze   |
-| 3    | un-freeze     | release the held requests and resume                |
-| 4    | slow-mode-on  | random delay before each client and peer request    |
-| 5    | slow-mode-off | stop delaying                                       |
+### Fault injection as a first-class feature
 
-From the console, mode first, then replica:
+The console can crash, freeze, un-freeze, or slow a replica. These are not test
+hooks around the system: they pass through the same administrative RPC surface
+used for ballots and reconfiguration, making failure behavior easy to observe.
 
-    console> debug 1 2      # crash replica 2
-    console> debug 2 0      # freeze replica 0
-    console> debug 3 0      # un-freeze it again
+## Try the cluster
 
-Modes gate `DidaTradeMainServiceImpl` and `DidaTradePaxosServiceImpl` only.
-`DidaTradeMasterServiceImpl` is deliberately never gated: a frozen replica must
-still be able to receive its own un-freeze (spec §5). Held requests block in
-their gRPC handler thread rather than being dropped, so they resume on
-un-freeze.
+The only host dependency is Docker or Podman. Java, Maven, protoc, and the
+gRPC toolchain run in a multi-architecture container.
 
-The gate sits on *inbound* RPCs, so freezing a replica stops it acting as
-acceptor and learner but does not stop its `MainLoop` from proposing. To stall a
-leader, crash it.
+```bash
+git clone https://github.com/sousa16/padi.git
+cd padi
 
-No compose service sets a restart policy, so a crashed replica stays down until
-`./dev.sh start <id>`.
+./dev.sh build
+./dev.sh up
+```
 
-## Layout
+Open two more terminals:
 
-    src/contract   protos
-    src/core       users, orders, matching
-    src/configs    Paxos configurations (schedules A/B/C)
-    src/util       gRPC response collectors
-    src/server     replica — Paxos plus the state machine
-    src/app        client
-    src/console    ballot/debug commands to replicas
-    report/        LaTeX report
+```bash
+./dev.sh console
+./dev.sh app
+```
 
-    Containerfile        dev/runtime image
-    compose.yaml         net namespace, replicas s0-s6, app, console
-    dev.sh               entry point for all of it
-    scripts/             build and per-replica launchers
+The client supports commands such as `populate`, `adduser`, `buy`, `sell`,
+`balance`, and `dump`; type `help` in the client for the complete list.
+Multiple clients must use distinct IDs:
 
-## TODO
+```bash
+./dev.sh app       # client 1
+./dev.sh app 2     # client 2
+```
 
-Going for Ultimate: steps 1 and 2 by the checkpoint, 3, 4 and 5 by the final.
-Checkpoint is 30 Sep, final is 16 Oct.
+## See state transfer happen
 
-- [x] Step 1 — debug modes (crash, freeze, un-freeze, slow-mode) and a real Paxos
-      phase 1. The baseline fakes it; started at `PhaseOneBogusProcessor`, replaced
-      by `PhaseOneProcessor`.
-- [x] Step 2 — Multi-Paxos, still on Schedule A. One phase 1 per leadership
-      change, pipelined phase 2 across instances, strict in-order execution.
-- [x] Step 3 — Fast-Paxos. Any-message proposing after the leader's phase 1,
-      per-value vote tallying, collision detection, and the automatic
-      reconfiguration from spec §4.4 (any replica bumps ballot on a stuck/
-      collided fast round, no console needed).
-- [x] Step 4 — `balance` outside Paxos, causally ordered. Every write goes
-      through one totally ordered log, so the client's causal history is a
-      single number: how many log slots it has seen (`seen_slot`, a vector
-      clock with one entry). Each write reply carries the slot it executed at;
-      `balance` sends `min_slot`, and a replica answers it locally, without
-      consensus, only once it has executed that far. A lagging replica waits
-      ("balance … waiting for slot N (at M)") rather than answering stale.
-- [x] Step 5 — dynamic membership and state transfer, on Schedules B and C
-      (C is where the acceptor set really changes, {0..4} → {2..6} at Config 2).
-      - *Completed ballot* (Vertical Paxos): a ballot is complete only once its
-        leader finished phase 1, every recovered value is accepted by a quorum
-        of that ballot's acceptors and, if the acceptor set changed, those
-        acceptors hold the decided log (`installstate` push). Learners no longer
-        guess it. The console relays it (`ballot`/`activate`), so the next
-        leader's phase 1 skips acceptors that left.
-      - *State transfer, pull*: a replica stuck on a gap, or on a decided
-        command whose client request never reached it, asks its peers
-        (`fetchstate`) for the decided positions *with the commands*.
-      - *Recovery*: a restarted replica fetches the log from its peers and
-        replays it. Having lost its promises and votes, it abstains as an
-        acceptor from every ballot up to the highest its peers report.
-      - Fixed `ScheduleC.quorum`: it was 2 of 5 acceptors (two quorums could be
-        disjoint); it is now 3.
-- [ ] Report, 6 pages, `report/latex8.tex`. AI-use (§13) and authorship (§14)
-      declarations are in, but the student numbers and contributions are
-      placeholders.
+Schedule C runs seven replicas and changes its acceptor set during a later
+configuration. Stop a replica, keep making trades, then restart it:
 
-## Testing Step 5 by hand
+```bash
+./dev.sh up C
+./dev.sh app 1 C
 
-    ./dev.sh up C
-    ./dev.sh app                 # populate 10, a few buy/sell (ballot 0, fast)
-    ./dev.sh console C           # ballot 2 3   -> leader 3, acceptors {2..6}
-                                 #   expect "completed = 2" back, and
-                                 #   "State transfer: acceptor set changed" in s3
-    ./dev.sh stop 0; ./dev.sh stop 1    # they left the configuration
-    console> ballot 3 4          # phase 1 now only asks {2..6}
-    ./dev.sh stop 6; (more ops); ./dev.sh start 6
-    ./dev.sh logs 6              # "Recovery: rejoining at ballot ..." and the replay
+./dev.sh stop 6
+# perform more operations in the client
+./dev.sh start 6
+./dev.sh logs 6
+```
 
-## Automated tests (Schedules A, B, C)
+The returning replica should fetch the decided suffix, replay it, and
+reconcile with the cluster. This is the moment the project becomes tangible:
+the system is not merely replicating messages; it is repairing a replica's
+state after the replica missed history.
 
-The scripts in `scripts/test/` start the replicas as plain java processes inside
-one container, drive them with scripted clients and console commands, crash and
-restart replicas, and check that every replica executed the same sequence of
-commands. From the repo root (needs `./dev.sh build` or the podman command below
-to have been run once):
+## Operate and break it
 
-    podman run --rm -v "$PWD/src:/work/src" -v "$PWD/scripts:/work/scripts" -v padi_m2:/root/.m2 \
-        --entrypoint bash didatrade:dev /work/scripts/test/run.sh testA   # or testB / testC
+From the console, debug modes are deliberately simple:
 
-Look for `OK: executed sequences agree` after each scenario.
+| Mode | Command | Effect |
+| --- | --- | --- |
+| Normal | `debug 0 <replica>` | Clear freeze and slow mode |
+| Crash | `debug 1 <replica>` | Stop the replica process |
+| Freeze | `debug 2 <replica>` | Hold inbound client and Paxos requests |
+| Un-freeze | `debug 3 <replica>` | Release held requests |
+| Slow mode | `debug 4 <replica>` | Add random request delays |
+| Slow mode off | `debug 5 <replica>` | Remove request delays |
+
+Start a new ballot with:
+
+```text
+ballot <ballot-number> <leader>
+```
+
+Schedules provide progressively richer experiments:
+
+| Schedule | Replicas | Use |
+| --- | ---: | --- |
+| `A` | 3 | Baseline Multi-Paxos and fault injection |
+| `B` | 5 | Larger quorum experiments |
+| `C` | 7 | Dynamic membership and state transfer |
+
+Useful commands:
+
+```bash
+./dev.sh ps
+./dev.sh logs
+./dev.sh logs 2
+./dev.sh stop 2
+./dev.sh start 2
+./dev.sh down
+./dev.sh clean
+```
+
+## Architecture
+
+```text
+src/
+├── contract/   Protocol Buffers and generated gRPC contracts
+├── core/       Users, orders, balances, and trading state
+├── configs/    Schedules A, B, and C
+├── util/       Response collectors and Paxos processors
+├── server/     Replica, Paxos log, state machine, and recovery
+├── app/        Interactive trading client
+└── console/    Ballot, reconfiguration, and fault-injection console
+
+compose.yaml   Replica topology and shared network namespace
+dev.sh         Build, run, stop, restart, and inspect the cluster
+Containerfile  Java 22 + Maven runtime image
+scripts/test/  Automated scenarios for schedules A, B, and C
+report/        Design and implementation report
+```
+
+The replicas share a network namespace because the protocol addresses peers as
+`localhost:<base-port + replica-id>`. They remain separate containers so each
+replica can be stopped and restarted independently.
+
+## Automated scenarios
+
+The test scripts launch replicas as plain Java processes, drive clients and
+the console, inject crashes and restarts, and verify that every replica
+executed the same command sequence.
+
+```bash
+./dev.sh build
+
+podman run --rm \
+  -v "$PWD/src:/work/src" \
+  -v "$PWD/scripts:/work/scripts" \
+  -v padi_m2:/root/.m2 \
+  --entrypoint bash didatrade:dev \
+  /work/scripts/test/run.sh testA
+```
+
+Run `testB` and `testC` for the larger quorum and reconfiguration scenarios.
+Each successful scenario ends with:
+
+```text
+OK: executed sequences agree
+```
+
+## Project milestones
+
+- **Step 1:** debug modes and real Paxos phase 1
+- **Step 2:** Multi-Paxos with pipelined phase 2
+- **Step 3:** Fast Paxos with collision recovery
+- **Step 4:** causally ordered `balance` reads
+- **Step 5:** dynamic membership, Vertical Paxos, state transfer, and recovery
+
+The project is implemented in Java with Maven, Protocol Buffers, and gRPC.
+The container is multi-architecture, so the same workflow runs natively on
+Linux amd64 and Apple Silicon arm64.
+
+## License
+
+Distributed under the [MIT License](LICENSE).
